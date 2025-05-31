@@ -53,6 +53,10 @@
 use anyhow::Result;
 use once_cell::sync::Lazy;
 use numpy::PyArray1;
+use numpy::Element;
+use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
+use std::os::raw::c_void;
+use std::io::Write;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::exceptions::PyValueError;
@@ -83,14 +87,23 @@ impl Shared {
 struct Update { idx: usize, val: f64 }
 
 async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
+    eprintln!("raftmem: handle_peer connected from {:?}", sock.peer_addr());
     let mut buf = vec![0u8; 128];
     loop {
         sock.readable().await?;
         match sock.try_read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => {
+                eprintln!("raftmem: handle_peer connection closed");
+                break;
+            }
             Ok(n) => {
-                let upd: Update = serde_json::from_slice(&buf[..n])?;
-                state.apply(upd.idx, upd.val);
+                eprintln!("raftmem: handle_peer read {} bytes", n);
+                if let Ok(upd) = serde_json::from_slice::<Update>(&buf[..n]) {
+                    eprintln!("raftmem: handle_peer update idx={} val={}", upd.idx, upd.val);
+                    state.apply(upd.idx, upd.val);
+                } else {
+                    eprintln!("raftmem: handle_peer failed to parse update");
+                }
             }
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
             Err(e) => return Err(e.into()),
@@ -100,25 +113,26 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
 }
 
 async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>) -> Result<()> {
-    let mut conns = Vec::new();
-    for p in peers {
-        if let Some(s) = TcpStream::connect(p).await.ok() {
-            conns.push(s);
-        }
-    }
-    while let Some(u) = rx.recv().await.ok() {
-        let data = serde_json::to_vec(&u)?;
-        let mut alive = Vec::new();
-        for mut s in conns {
-            if s.writable().await.is_ok() {
-                if let Ok(n) = s.try_write(&data) {
-                    if n == data.len() {
-                        alive.push(s);
-                    }
+    // For each update, connect to each peer and send data (ephemeral connections)
+    while let Ok(u) = rx.recv().await {
+        eprintln!("raftmem: broadcaster got update idx={} val={}", u.idx, u.val);
+        let data = match serde_json::to_vec(&u) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        for addr in &peers {
+            eprintln!("raftmem: broadcaster sending to {}", addr);
+            let data = data.clone();
+            let addr = *addr;
+            tokio::spawn(async move {
+                if let Ok(mut s) = TcpStream::connect(addr).await {
+                    eprintln!("raftmem: broadcaster connected to {}", addr);
+                    // Wait until writable, then send
+                    let _ = s.writable().await;
+                    let _ = s.try_write(&data);
                 }
-            }
+            });
         }
-        conns = alive;
     }
     Ok(())
 }
@@ -136,19 +150,62 @@ async fn listener(addr: SocketAddr, state: Shared) -> Result<()> {
 #[pyclass]
 struct Node {
     state: Shared,
-    tx: async_channel::Sender<Update>,
+    /// Peer socket addresses for broadcasting updates
+    peers: Vec<SocketAddr>,
 }
 
 #[pymethods]
 impl Node {
     #[getter]
-    fn ndarray<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
-        // Return a NumPy array view of the current state (copy of snapshot)
-        PyArray1::from_slice(py, &self.state.snapshot())
+    fn ndarray<'py>(self_: PyRef<'py, Node>, py: Python<'py>) -> &'py PyArray1<f64> {
+        // Zero-copy NumPy view into the shared buffer.
+        // Dimensions (1D array of length 10)
+        let dims: [npy_intp; 1] = [10];
+        // Stride (in bytes) for f64
+        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+        // Pointer to shared buffer
+        let data_ptr = self_.state.buf.read().as_ptr() as *mut c_void;
+        unsafe {
+            // Get the NumPy array type and dtype descriptor
+            let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
+            let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
+            // Create array from existing data, writeable, base object = this Node
+            let arr_ptr = PY_ARRAY_API.PyArray_NewFromDescr(
+                py,
+                subtype,
+                descr,
+                1,
+                dims.as_ptr() as *mut npy_intp,
+                strides.as_ptr() as *mut npy_intp,
+                data_ptr,
+                NPY_ARRAY_WRITEABLE,
+                self_.as_ptr(),
+            );
+            // Wrap raw pointer as PyArray1
+            PyArray1::from_owned_ptr(py, arr_ptr)
+        }
     }
+    /// Broadcast an update for the given index to all peers
     fn flush(&self, idx: usize) {
         let val = self.state.snapshot()[idx];
-        let _ = self.tx.try_send(Update { idx, val });
+        // Serialize update
+        if let Ok(data) = serde_json::to_vec(&Update { idx, val }) {
+            for addr in &self.peers {
+                // Attempt connection
+                println!("raftmem: flush connecting to {}", addr);
+                match std::net::TcpStream::connect(addr) {
+                    Ok(mut s) => {
+                        println!("raftmem: flush connected to {}", addr);
+                        if let Err(e) = s.write_all(&data) {
+                            println!("raftmem: flush write error to {}: {}", addr, e);
+                        }
+                    }
+                    Err(e) => {
+                        println!("raftmem: flush connect error to {}: {}", addr, e);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -156,18 +213,26 @@ impl Node {
 #[pyo3(signature = (name, listen, peers))]
 fn start(py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
     let state = Shared { buf: Arc::new(RwLock::new([0.0; 10])) };
-    let (tx, rx) = async_channel::bounded(1024);
+    // Channel-based broadcaster removed; using synchronous broadcast in flush
 
     let listen_addr: SocketAddr = listen.parse()
         .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
-    let peer_addrs: Vec<SocketAddr> = peers.into_iter().filter_map(|p| p.parse().ok()).collect();
+    // Resolve peer addresses (allow DNS names or IP literals)
+    use std::net::ToSocketAddrs;
+    let mut peer_addrs = Vec::new();
+    for p in peers {
+        match p.to_socket_addrs() {
+            Ok(addrs) => peer_addrs.extend(addrs),
+            Err(e) => eprintln!("raftmem: warning: failed to resolve peer '{}': {}", p, e),
+        }
+    }
 
+    // Start listener for incoming updates
     let st_clone = state.clone();
     RUNTIME.spawn(listener(listen_addr, st_clone));
-    RUNTIME.spawn(broadcaster(peer_addrs, rx));
 
     println!("node {} running on {}", name, listen);
-    Ok(Node { state, tx })
+    Ok(Node { state, peers: peer_addrs })
 }
 
 // ---------- module init ----------------------------------------------------

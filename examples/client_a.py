@@ -1,5 +1,5 @@
 import raftmem, numpy as np, random, time
-node = raftmem.start(name="a", listen="0.0.0.0:7000", peers=["nodeB:7001"])
+node = raftmem.start(name="a", listen="0.0.0.0:7000", peers=["0.0.0.0:7001"])
 arr  = node.ndarray     # shared   [f64;10]
 while True:
     idx = random.randrange(10); val = random.random()*10
