@@ -1,0 +1,28 @@
+[package]
+name = "raftmem"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <you@example.com>"]
+license = "MIT OR Apache-2.0"
+description = "Embedded, replicated shared NumPy array demo"
+readme = "README.md"
+
+[lib]
+name = "raftmem"
+# `cdylib` builds a native dynamic library that Python can import
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3        = { version = "0.20", features = ["extension-module", "auto-initialize"] }
+numpy       = "0.20"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+anyhow      = "1"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+parking_lot = "0.12"
+once_cell   = "1"
+async-channel = "1"   # used in lib.rs for the broadcast queue
+
+[build-dependencies]
+pyo3-build-config = "0.20"
+
