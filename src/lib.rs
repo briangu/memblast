@@ -8,7 +8,6 @@ use libc::{mprotect, PROT_READ, PROT_WRITE};
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use once_cell::sync::Lazy;
-use parking_lot::RwLock;
 use pyo3::{prelude::*, wrap_pyfunction, types::PyModule};
 use pyo3::exceptions::PyRuntimeError;
 use serde::{Deserialize, Serialize};
@@ -93,7 +92,6 @@ async fn listener(listener: TcpListener, shared: Shared) -> Result<()> {
 struct Node {
     shared: Shared,
     peers: Vec<SocketAddr>,
-    batching: Arc<RwLock<bool>>,
 }
 
 #[pymethods]
@@ -123,10 +121,9 @@ impl Node {
         }
     }
 
-    /// Begin a “batch” context. While in batch, the underlying mmap is kept writable.
-    fn batch<'py>(slf: PyRef<'py, Self>) -> PyResult<BatchGuard> {
+    /// Begin a write context: mmap becomes writable and writes will be flushed on exit.
+    fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
         let len = slf.shared.0.mm.len();
-        // Make sure the page is READ|WRITE while we’re in a batch.
         unsafe {
             let ret = mprotect(
                 slf.shared.0.mm.as_ptr() as *mut _,
@@ -134,14 +131,22 @@ impl Node {
                 PROT_READ | PROT_WRITE,
             );
             if ret != 0 {
-                return Err(PyRuntimeError::new_err("mprotect(PROT_READ|WRITE) failed in batch()"));
+                return Err(PyRuntimeError::new_err("mprotect(PROT_READ|WRITE) failed in write()"));
             }
         }
+        Ok(WriteGuard { node: slf.into() })
+    }
 
-        *slf.batching.write() = true;
-        Ok(BatchGuard {
-            node: slf.into(),
-        })
+    /// Begin a read context: updates are blocked until exit.
+    fn read<'py>(slf: PyRef<'py, Self>) -> PyResult<ReadGuard> {
+        let len = slf.shared.0.mm.len();
+        unsafe {
+            let ret = mprotect(slf.shared.0.mm.as_ptr() as *mut _, len, PROT_READ);
+            if ret != 0 {
+                return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in read()"));
+            }
+        }
+        Ok(ReadGuard { node: slf.into() })
     }
 
     /// Manual flush helper if the user wants to push immediately.
@@ -151,38 +156,6 @@ impl Node {
     }
 }
 
-#[pyclass]
-struct BatchGuard {
-    node: Py<Node>,
-}
-
-#[pymethods]
-impl BatchGuard {
-    fn __enter__<'py>(slf: PyRefMut<'py, Self>) -> PyResult<Py<Node>> {
-        Ok(slf.node.clone())
-    }
-
-    fn __exit__(
-        &mut self,
-        _t: &PyAny,
-        _v: &PyAny,
-        _tb: &PyAny,
-    ) -> PyResult<()> {
-        Python::with_gil(|py| {
-            let cell = self.node.as_ref(py).borrow();
-            // Flush the current values to peers before making it read-only again:
-            flush_now(&*cell);
-            *cell.batching.write() = false;
-            let len = cell.shared.0.mm.len();
-            // After flushing, mark the mmap read‐only again:
-            let ret = unsafe { mprotect(cell.shared.0.mm.as_ptr() as *mut _, len, PROT_READ) };
-            if ret != 0 {
-                return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in __exit__"));
-            }
-            Ok(())
-        })
-    }
-}
 
 /// Start a new Node that listens on `listen` (and immediately spawns a Tokio task for it)
 /// and also knows how to broadcast to the given `peers`.
@@ -198,9 +171,16 @@ fn start(_py: Python<'_>, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
         .filter_map(|p| p.parse().ok())
         .collect();
 
-    let batching = Arc::new(RwLock::new(false));
 
-    // 3) Bind the listener synchronously so EADDRINUSE pops up at import time:
+    // 3) Make mmap read-only until a write() context, then bind the listener:
+    let len0 = shared.0.mm.len();
+    unsafe {
+        let ret = mprotect(shared.0.mm.as_ptr() as *mut _, len0, PROT_READ);
+        if ret != 0 {
+            return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in start()"));
+        }
+    }
+    // Bind the listener synchronously so EADDRINUSE pops up at import time:
     // …bind std_listener…
     let std_listener = std::net::TcpListener::bind(listen)
         .map_err(|e| PyRuntimeError::new_err(format!("bind {listen}: {e}")))?;
@@ -225,7 +205,6 @@ fn start(_py: Python<'_>, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
     Ok(Node {
         shared,
         peers: peer_addrs,
-        batching,
     })
 }
 
@@ -252,11 +231,98 @@ fn flush_now(node: &Node) {
     });
 }
 
+#[pyclass]
+struct WriteGuard {
+    node: Py<Node>,
+}
+
+#[pymethods]
+impl WriteGuard {
+    fn __enter__<'py>(slf: PyRefMut<'py, Self>, py: Python<'py>) -> &'py PyArray1<f64> {
+        let cell = slf.node.as_ref(py).borrow();
+        // Return a writable ndarray view.
+        let dims: [npy_intp; 1] = [10];
+        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+        unsafe {
+            let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
+            let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
+            let arr_ptr = PY_ARRAY_API.PyArray_NewFromDescr(
+                py,
+                subtype,
+                descr,
+                dims.len() as c_int,
+                dims.as_ptr() as *mut npy_intp,
+                strides.as_ptr() as *mut npy_intp,
+                cell.shared.0.ptr(),
+                NPY_ARRAY_WRITEABLE,
+                cell.as_ptr(),
+            );
+            PyArray1::from_owned_ptr(py, arr_ptr)
+        }
+    }
+
+    fn __exit__(&mut self, _t: &PyAny, _v: &PyAny, _tb: &PyAny) -> PyResult<()> {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            flush_now(&*cell);
+            let len = cell.shared.0.mm.len();
+            let ret = unsafe { mprotect(cell.shared.0.mm.as_ptr() as *mut _, len, PROT_READ) };
+            if ret != 0 {
+                return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in write() exit"));
+            }
+            Ok(())
+        })
+    }
+}
+
+#[pyclass]
+struct ReadGuard {
+    node: Py<Node>,
+}
+
+#[pymethods]
+impl ReadGuard {
+    fn __enter__<'py>(slf: PyRefMut<'py, Self>, py: Python<'py>) -> &'py PyArray1<f64> {
+        let cell = slf.node.as_ref(py).borrow();
+        // Return a read-only ndarray view.
+        let dims: [npy_intp; 1] = [10];
+        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+        unsafe {
+            let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
+            let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
+            let arr_ptr = PY_ARRAY_API.PyArray_NewFromDescr(
+                py,
+                subtype,
+                descr,
+                dims.len() as c_int,
+                dims.as_ptr() as *mut npy_intp,
+                strides.as_ptr() as *mut npy_intp,
+                cell.shared.0.ptr(),
+                0,
+                cell.as_ptr(),
+            );
+            PyArray1::from_owned_ptr(py, arr_ptr)
+        }
+    }
+
+    fn __exit__(&mut self, _t: &PyAny, _v: &PyAny, _tb: &PyAny) -> PyResult<()> {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            let len = cell.shared.0.mm.len();
+            let ret = unsafe { mprotect(cell.shared.0.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE) };
+            if ret != 0 {
+                return Err(PyRuntimeError::new_err("mprotect(PROT_READ|WRITE) failed in read() exit"));
+            }
+            Ok(())
+        })
+    }
+}
 
 #[pymodule]
 fn raftmem(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<Node>()?;
-    m.add_class::<BatchGuard>()?;
+    m.add_class::<WriteGuard>()?;
+    m.add_class::<ReadGuard>()?;
     m.add_function(wrap_pyfunction!(start, m)?)?;
     Ok(())
 }
