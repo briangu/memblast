@@ -41,7 +41,7 @@ impl MmapBuf {
     fn new() -> Result<Self> {
         // We only need to hold 10 f64s (80 bytes), no page-align requirement here.
         let layout = 10 * std::mem::size_of::<f64>();
-        let mm = unsafe { MmapOptions::new().len(layout).map_anon()? };
+        let mm = MmapOptions::new().len(layout).map_anon()?;
         Ok(Self { mm })
     }
 
@@ -60,35 +60,23 @@ struct Full {
 }
 
 // ---------- networking helpers ----------------------------------------
-async fn broadcast_full(peers: &[SocketAddr], payload: &Full) {
-    if let Ok(buf) = serde_json::to_vec(payload) {
-        for &p in peers {
-            if let Ok(mut s) = TcpStream::connect(p).await {
-                let _ = s.write_all(&buf).await;
-            }
-        }
-    }
-}
-
 async fn handle_peer(mut sock: TcpStream, shared: Shared) -> Result<()> {
-    let mut buf = vec![0u8; 256];
+    let len = shared.0.mm.len();
+
     loop {
-        let n = sock.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        if let Ok(msg) = serde_json::from_slice::<Full>(&buf[..n]) {
-            // Write incoming values into our mmap'd region
-            unsafe {
-                let base = shared.0.mm.as_ptr() as *mut f64;
-                for (i, v) in msg.vals.iter().enumerate().take(10) {
-                    *base.add(i) = *v;
-                }
-            }
+        // A mutable view onto this process’ own mmap:
+        let dst: &mut [u8] = unsafe {
+            std::slice::from_raw_parts_mut(shared.0.mm.as_ptr() as *mut u8, len)
+        };
+
+        // read_exact fills the mmap slice in-place – no intermediate buffer.
+        if sock.read_exact(dst).await.is_err() {
+            break;       // peer closed
         }
     }
     Ok(())
 }
+
 
 async fn listener(listener: TcpListener, shared: Shared) -> Result<()> {
     loop {
@@ -241,22 +229,29 @@ fn start(_py: Python<'_>, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
     })
 }
 
-// ---------- helper -----------------------------------------------------
-fn flush_now(node: &Node) {
-    let vals = unsafe {
-        let base = node.shared.0.mm.as_ptr() as *const f64;
-        let mut v = [0.0f64; 10];
-        for i in 0..10 {
-            v[i] = *base.add(i);
-        }
-        v
+async fn broadcast_raw(peers: &[SocketAddr], shared: Shared) {
+    // Unsafe is just to cast the mmap pointer to a byte slice.
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(shared.0.mm.as_ptr(), shared.0.mm.len())
     };
 
-    let peers = node.peers.clone();
+    for &addr in peers {
+        if let Ok(mut s) = TcpStream::connect(addr).await {
+            let _ = s.write_all(bytes).await;      // <-- write the mmap slice itself
+        }
+    }
+}
+
+// ---------- helper -----------------------------------------------------
+fn flush_now(node: &Node) {
+    let peers  = node.peers.clone();
+    let shared = node.shared.clone();          // keep the mmap alive for the async task
+
     RT.spawn(async move {
-        broadcast_full(&peers, &Full { vals: vals.to_vec() }).await;
+        broadcast_raw(&peers, shared).await;
     });
 }
+
 
 #[pymodule]
 fn raftmem(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
