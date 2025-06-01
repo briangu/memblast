@@ -13,7 +13,6 @@ numpy==2.0.2
 openai==1.82.1
 pydantic==2.11.5
 pydantic_core==2.33.2
-raftmem @ file:///Users/brianguarraci/scm/raftmem
 sniffio==1.3.1
 tomli==2.2.1
 tqdm==4.67.1
