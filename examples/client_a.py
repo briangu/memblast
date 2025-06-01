@@ -1,9 +1,12 @@
-import raftmem, numpy as np, random, time
-node = raftmem.start(name="a", listen="0.0.0.0:7000", peers=["0.0.0.0:7001"])
-arr  = node.ndarray     # shared   [f64;10]
+import raftmem, random, time, numpy as np
+
+node = raftmem.start("0.0.0.0:7010", ["0.0.0.0:7011"])
+a = node.ndarray
+
 while True:
-    idx = random.randrange(10); val = random.random()*10
-    arr[idx] = val       # ← real NumPy write, replicated
-    node.flush(idx)      # tell raftmem to broadcast dirty slot
-    print("A", arr)
-    time.sleep(1)
+    with node.batch():               # writes accumulate locally
+        for _ in range(8):
+            a[random.randrange(10)] = random.random() * 10
+    print(a)
+    time.sleep(1)                  # batch flushes on __exit__
+

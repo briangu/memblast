@@ -1,244 +1,267 @@
-//! raftmem_rs 0.2 — **embedded Python service + shared NumPy array**
-//!
-//! One `import raftmem` call boots a background Tokio runtime **inside the
-//! Python process**.  You get:
-//!   • A 10‑element `f64` ring mapped into NumPy zero‑copy.
-//!   • Transparent replication to peer nodes over TCP using simple
-//!     leader‑less broadcast (good‑enough demo).  Change one element → every
-//!     node converges.
-//!
-//! ## Python demo (two machines / two shells)
-//! ```bash
-//! # shell A (machine A)
-//! python - <<'PY'
-//! import raftmem, numpy as np, random, time
-//! node = raftmem.start(name="a", listen="0.0.0.0:7000", peers=["nodeB:7001"])
-//! arr  = node.ndarray     # shared   [f64;10]
-//! while True:
-//!     idx = random.randrange(10); val = random.random()*10
-//!     arr[idx] = val       # ← real NumPy write, replicated
-//!     node.flush(idx)      # tell raftmem to broadcast dirty slot
-//!     print("A", arr)
-//!     time.sleep(1)
-//! PY
-//! ```
-//! ```bash
-//! # shell B (machine B)
-//! python - <<'PY'
-//! import raftmem, numpy as np, random, time
-//! node = raftmem.start(name="b", listen="0.0.0.0:7001", peers=["nodeA:7000"])
-//! arr  = node.ndarray
-//! while True:
-//!     print("B", arr)     # will follow writes from A
-//!     time.sleep(1)
-//! PY
-//! ```
-//!
-//! ---------------------------------------------------------------------------
-//! Cargo.toml (abbreviated)
-//! ---------------------------------------------------------------------------
-//! [dependencies]
-//! pyo3        = { version = "0.20", features=["extension-module", "auto-initialize"] }
-//! numpy       = "0.19"
-//! tokio       = { version="1", features=["rt", "macros", "net"] }
-//! anyhow      = "1"
-//! serde       = { version="1", features=["derive"] }
-//! serde_json  = "1"
-//! parking_lot = "0.12"
-//! once_cell   = "1"
-//! ---------------------------------------------------------------------------
-//! src/lib.rs — full single‑file library
-//! ---------------------------------------------------------------------------
+// ===============================================================
+// raftmem_rs 0.6 — explicit‐batch flush only, no signal handling
+// ===============================================================
 
 use anyhow::Result;
-use once_cell::sync::Lazy;
-use numpy::PyArray1;
-use numpy::Element;
+use memmap2::{MmapMut, MmapOptions};
+use libc::{mprotect, PROT_READ, PROT_WRITE};
+use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
-use std::os::raw::c_void;
-use std::io::Write;
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
-use pyo3::exceptions::PyValueError;
-use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
-use std::sync::Arc;
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
-use std::io::ErrorKind;
+use pyo3::{prelude::*, wrap_pyfunction, types::PyModule};
+use pyo3::exceptions::PyRuntimeError;
+use serde::{Deserialize, Serialize};
+use std::{
+    net::SocketAddr,
+    os::raw::{c_int, c_void},
+    sync::Arc,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    runtime::{Builder, Runtime},
+};
 
-// ---------- global Tokio runtime (one per process) -------------------------
-static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
+// ---------- Tokio runtime (shared) ------------------------------------
+static RT: Lazy<Runtime> = Lazy::new(|| {
+    Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+});
 
-// ---------- in‑memory state -------------------------------------------------
+// ---------- shared mmap buffer ----------------------------------------
+struct MmapBuf {
+    mm: MmapMut,
+}
+
+impl MmapBuf {
+    fn new() -> Result<Self> {
+        // We only need to hold 10 f64s (80 bytes), no page-align requirement here.
+        let layout = 10 * std::mem::size_of::<f64>();
+        let mm = unsafe { MmapOptions::new().len(layout).map_anon()? };
+        Ok(Self { mm })
+    }
+
+    fn ptr(&self) -> *mut c_void {
+        self.mm.as_ptr() as *mut _
+    }
+}
+
 #[derive(Clone)]
-struct Shared {
-    buf: Arc<RwLock<[f64; 10]>>,
-}
-impl Shared {
-    fn apply(&self, idx: usize, val: f64) {
-        if idx < 10 { self.buf.write()[idx] = val; }
-    }
-    fn snapshot(&self) -> [f64; 10] { *self.buf.read() }
+struct Shared(Arc<MmapBuf>);
+
+// ---------- wire format -----------------------------------------------
+#[derive(Serialize, Deserialize)]
+struct Full {
+    vals: Vec<f64>,
 }
 
-// ---------- wire protocol ---------------------------------------------------
-#[derive(Debug, Serialize, Deserialize)]
-struct Update { idx: usize, val: f64 }
-
-async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
-    eprintln!("raftmem: handle_peer connected from {:?}", sock.peer_addr());
-    let mut buf = vec![0u8; 128];
-    loop {
-        sock.readable().await?;
-        match sock.try_read(&mut buf) {
-            Ok(0) => {
-                eprintln!("raftmem: handle_peer connection closed");
-                break;
+// ---------- networking helpers ----------------------------------------
+async fn broadcast_full(peers: &[SocketAddr], payload: &Full) {
+    if let Ok(buf) = serde_json::to_vec(payload) {
+        for &p in peers {
+            if let Ok(mut s) = TcpStream::connect(p).await {
+                let _ = s.write_all(&buf).await;
             }
-            Ok(n) => {
-                eprintln!("raftmem: handle_peer read {} bytes", n);
-                if let Ok(upd) = serde_json::from_slice::<Update>(&buf[..n]) {
-                    eprintln!("raftmem: handle_peer update idx={} val={}", upd.idx, upd.val);
-                    state.apply(upd.idx, upd.val);
-                } else {
-                    eprintln!("raftmem: handle_peer failed to parse update");
+        }
+    }
+}
+
+async fn handle_peer(mut sock: TcpStream, shared: Shared) -> Result<()> {
+    let mut buf = vec![0u8; 256];
+    loop {
+        let n = sock.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        if let Ok(msg) = serde_json::from_slice::<Full>(&buf[..n]) {
+            // Write incoming values into our mmap'd region
+            unsafe {
+                let base = shared.0.mm.as_ptr() as *mut f64;
+                for (i, v) in msg.vals.iter().enumerate().take(10) {
+                    *base.add(i) = *v;
                 }
             }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e.into()),
         }
     }
     Ok(())
 }
 
-async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>) -> Result<()> {
-    // For each update, connect to each peer and send data (ephemeral connections)
-    while let Ok(u) = rx.recv().await {
-        eprintln!("raftmem: broadcaster got update idx={} val={}", u.idx, u.val);
-        let data = match serde_json::to_vec(&u) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        for addr in &peers {
-            eprintln!("raftmem: broadcaster sending to {}", addr);
-            let data = data.clone();
-            let addr = *addr;
-            tokio::spawn(async move {
-                if let Ok(mut s) = TcpStream::connect(addr).await {
-                    eprintln!("raftmem: broadcaster connected to {}", addr);
-                    // Wait until writable, then send
-                    let _ = s.writable().await;
-                    let _ = s.try_write(&data);
-                }
-            });
-        }
-    }
-    Ok(())
-}
-
-async fn listener(addr: SocketAddr, state: Shared) -> Result<()> {
-    let lst = TcpListener::bind(addr).await?;
+async fn listener(listener: TcpListener, shared: Shared) -> Result<()> {
     loop {
-        let (sock, _) = lst.accept().await?;
-        let st = state.clone();
-        tokio::spawn(async move { let _ = handle_peer(sock, st).await; });
+        let (sock, _) = listener.accept().await?;
+        let shared2 = shared.clone();
+        tokio::spawn(async move {
+            let _ = handle_peer(sock, shared2).await;
+        });
     }
 }
 
-// ---------- exposed Python face -------------------------------------------
+// ---------- Python bindings -------------------------------------------
 #[pyclass]
 struct Node {
-    state: Shared,
-    /// Peer socket addresses for broadcasting updates
+    shared: Shared,
     peers: Vec<SocketAddr>,
+    batching: Arc<RwLock<bool>>,
 }
 
 #[pymethods]
 impl Node {
+    /// Return a numpy.ndarray\<f64\> view of our shared buffer (length 10).
     #[getter]
-    fn ndarray<'py>(self_: PyRef<'py, Node>, py: Python<'py>) -> &'py PyArray1<f64> {
-        // Zero-copy NumPy view into the shared buffer.
-        // Dimensions (1D array of length 10)
+    fn ndarray<'py>(slf: PyRef<'py, Node>, py: Python<'py>) -> &'py PyArray1<f64> {
+        // We expose a 1‐D array of length 10.
         let dims: [npy_intp; 1] = [10];
-        // Stride (in bytes) for f64
         let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
-        // Pointer to shared buffer
-        let data_ptr = self_.state.buf.read().as_ptr() as *mut c_void;
+
         unsafe {
-            // Get the NumPy array type and dtype descriptor
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
             let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
-            // Create array from existing data, writeable, base object = this Node
             let arr_ptr = PY_ARRAY_API.PyArray_NewFromDescr(
                 py,
                 subtype,
                 descr,
-                1,
+                dims.len() as c_int,
                 dims.as_ptr() as *mut npy_intp,
                 strides.as_ptr() as *mut npy_intp,
-                data_ptr,
+                slf.shared.0.ptr(),
                 NPY_ARRAY_WRITEABLE,
-                self_.as_ptr(),
+                slf.as_ptr(),
             );
-            // Wrap raw pointer as PyArray1
             PyArray1::from_owned_ptr(py, arr_ptr)
         }
     }
-    /// Broadcast an update for the given index to all peers
-    fn flush(&self, idx: usize) {
-        let val = self.state.snapshot()[idx];
-        // Serialize update
-        if let Ok(data) = serde_json::to_vec(&Update { idx, val }) {
-            for addr in &self.peers {
-                // Attempt connection
-                println!("raftmem: flush connecting to {}", addr);
-                match std::net::TcpStream::connect(addr) {
-                    Ok(mut s) => {
-                        println!("raftmem: flush connected to {}", addr);
-                        if let Err(e) = s.write_all(&data) {
-                            println!("raftmem: flush write error to {}: {}", addr, e);
-                        }
-                    }
-                    Err(e) => {
-                        println!("raftmem: flush connect error to {}: {}", addr, e);
-                    }
-                }
+
+    /// Begin a “batch” context. While in batch, the underlying mmap is kept writable.
+    fn batch<'py>(slf: PyRef<'py, Self>) -> PyResult<BatchGuard> {
+        let len = slf.shared.0.mm.len();
+        // Make sure the page is READ|WRITE while we’re in a batch.
+        unsafe {
+            let ret = mprotect(
+                slf.shared.0.mm.as_ptr() as *mut _,
+                len,
+                PROT_READ | PROT_WRITE,
+            );
+            if ret != 0 {
+                return Err(PyRuntimeError::new_err("mprotect(PROT_READ|WRITE) failed in batch()"));
             }
         }
+
+        *slf.batching.write() = true;
+        Ok(BatchGuard {
+            node: slf.into(),
+        })
+    }
+
+    /// Manual flush helper if the user wants to push immediately.
+    fn flush(&self) -> PyResult<()> {
+        flush_now(self);
+        Ok(())
     }
 }
 
+#[pyclass]
+struct BatchGuard {
+    node: Py<Node>,
+}
+
+#[pymethods]
+impl BatchGuard {
+    fn __enter__<'py>(slf: PyRefMut<'py, Self>) -> PyResult<Py<Node>> {
+        Ok(slf.node.clone())
+    }
+
+    fn __exit__(
+        &mut self,
+        _t: &PyAny,
+        _v: &PyAny,
+        _tb: &PyAny,
+    ) -> PyResult<()> {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            // Flush the current values to peers before making it read-only again:
+            flush_now(&*cell);
+            *cell.batching.write() = false;
+            let len = cell.shared.0.mm.len();
+            // After flushing, mark the mmap read‐only again:
+            let ret = unsafe { mprotect(cell.shared.0.mm.as_ptr() as *mut _, len, PROT_READ) };
+            if ret != 0 {
+                return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in __exit__"));
+            }
+            Ok(())
+        })
+    }
+}
+
+/// Start a new Node that listens on `listen` (and immediately spawns a Tokio task for it)
+/// and also knows how to broadcast to the given `peers`.
 #[pyfunction]
-#[pyo3(signature = (name, listen, peers))]
-fn start(py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
-    let state = Shared { buf: Arc::new(RwLock::new([0.0; 10])) };
-    // Channel-based broadcaster removed; using synchronous broadcast in flush
+fn start(_py: Python<'_>, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
+    // 1) Create an anonymous mmap for 10 f64s:
+    let buf = MmapBuf::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let shared = Shared(Arc::new(buf));
 
-    let listen_addr: SocketAddr = listen.parse()
-        .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
-    // Resolve peer addresses (allow DNS names or IP literals)
-    use std::net::ToSocketAddrs;
-    let mut peer_addrs = Vec::new();
-    for p in peers {
-        match p.to_socket_addrs() {
-            Ok(addrs) => peer_addrs.extend(addrs),
-            Err(e) => eprintln!("raftmem: warning: failed to resolve peer '{}': {}", p, e),
+    // 2) Parse each peer address as SocketAddr:
+    let peer_addrs: Vec<SocketAddr> = peers
+        .into_iter()
+        .filter_map(|p| p.parse().ok())
+        .collect();
+
+    let batching = Arc::new(RwLock::new(false));
+
+    // 3) Bind the listener synchronously so EADDRINUSE pops up at import time:
+    // …bind std_listener…
+    let std_listener = std::net::TcpListener::bind(listen)
+        .map_err(|e| PyRuntimeError::new_err(format!("bind {listen}: {e}")))?;
+    std_listener.set_nonblocking(true)
+        .map_err(|e| PyRuntimeError::new_err(format!("non-blocking: {e}")))?;
+
+    // — Remove the semicolon at the end, and move `?` outside the closure:
+    let tokio_listener = {
+        let _g = RT.enter();
+        tokio::net::TcpListener::from_std(std_listener)
+            .map_err(|e| PyRuntimeError::new_err(format!("to-tokio: {e}")))?
+    };
+
+    let shared2 = shared.clone();
+    RT.spawn(async move {
+        if let Err(e) = listener(tokio_listener, shared2).await {
+            eprintln!("raftmem listener error: {e}");
         }
-    }
+    });
 
-    // Start listener for incoming updates
-    let st_clone = state.clone();
-    RUNTIME.spawn(listener(listen_addr, st_clone));
-
-    println!("node {} running on {}", name, listen);
-    Ok(Node { state, peers: peer_addrs })
+    println!("raftmem: started on {}", listen);
+    Ok(Node {
+        shared,
+        peers: peer_addrs,
+        batching,
+    })
 }
 
-// ---------- module init ----------------------------------------------------
+// ---------- helper -----------------------------------------------------
+fn flush_now(node: &Node) {
+    let vals = unsafe {
+        let base = node.shared.0.mm.as_ptr() as *const f64;
+        let mut v = [0.0f64; 10];
+        for i in 0..10 {
+            v[i] = *base.add(i);
+        }
+        v
+    };
+
+    let peers = node.peers.clone();
+    RT.spawn(async move {
+        broadcast_full(&peers, &Full { vals: vals.to_vec() }).await;
+    });
+}
+
 #[pymodule]
 fn raftmem(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<Node>()?;
+    m.add_class::<BatchGuard>()?;
     m.add_function(wrap_pyfunction!(start, m)?)?;
     Ok(())
 }
