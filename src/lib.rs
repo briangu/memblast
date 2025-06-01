@@ -154,6 +154,14 @@ impl Node {
         flush_now(self);
         Ok(())
     }
+    /// Construct a new Node by binding to `listen` and connecting to `peers`.
+    #[new]
+    fn new(listen: String, peers: Vec<String>) -> PyResult<Self> {
+        Python::with_gil(|py| {
+            let peer_slices: Vec<&str> = peers.iter().map(String::as_str).collect();
+            start(py, &listen, peer_slices)
+        })
+    }
 }
 
 

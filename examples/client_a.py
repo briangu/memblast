@@ -1,6 +1,15 @@
-import raftmem, random, time, numpy as np
+import argparse
+import random
+import time
+import numpy as np
+import raftmem
 
-node = raftmem.start("0.0.0.0:7010", ["0.0.0.0:7011"])
+parser = argparse.ArgumentParser()
+parser.add_argument('--listen', default='0.0.0.0:7010')
+parser.add_argument('--peers', nargs='+', default=['0.0.0.0:7011', '0.0.0.0:7012'])
+args = parser.parse_args()
+
+node = raftmem.Node(args.listen, args.peers)
 
 while True:
     with node.write() as a:          # writes accumulate locally
