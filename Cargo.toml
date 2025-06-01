@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3          = { version = "0.20", features = ["extension-module", "auto-initialize"] }
-numpy         = "0.20"
+numpy         = { version = "0.20", features = ["npyffi"] }
 tokio         = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 anyhow        = "1"
 serde         = { version = "1", features = ["derive"] }
