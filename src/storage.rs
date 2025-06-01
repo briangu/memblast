@@ -1,23 +1,14 @@
 //! In-memory Raft storage that replicates a shared memory map snapshot using OpenRaft.
 
-use std::{
-    collections::BTreeMap,
-    fmt::Debug,
-    io::Cursor,
-    ops::RangeBounds,
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
-};
-use async_trait::async_trait;
+use std::{io::Cursor, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 use openraft::{Entry, EntryPayload, LogId, StorageError, OptionalSend};
-use openraft::storage::{
-    RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine,
-    Snapshot, SnapshotMeta, LogState, IOFlushed,
-};
+use openraft::storage::{RaftSnapshotBuilder, RaftStateMachine, Snapshot, SnapshotMeta};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::{Shared, TypeConfig};
-use mem_log::LogStore;
+use openraft::RaftTypeConfig;
+use openraft_memstore::{new_mem_store as new_log_store, MemLogStore};
 
 /// Application request: full snapshot bytes of the NumPy array.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -65,11 +56,70 @@ impl StateMachineStore {
 }
 
 /// Create a new log store and state machine store pair.
-pub fn new_mem_store(shared: Shared) -> (LogStore<TypeConfig>, Arc<StateMachineStore>) {
-    (LogStore::default(), Arc::new(StateMachineStore::new(shared)))
+pub fn new_mem_store(shared: Shared) -> (Arc<MemLogStore>, Arc<StateMachineStore>) {
+    let (log_store, _mem_sm) = new_log_store();
+    (log_store, Arc::new(StateMachineStore::new(shared)))
 }
 
-#[async_trait]
+/// Stub implementations of RaftLogStorage and RaftLogReader for our TypeConfig,
+/// delegating to the in-memory log store from openraft-memstore crate.
+use openraft::storage::{RaftLogReader, RaftLogStorage, LogState, IOFlushed};
+use std::{fmt::Debug, ops::RangeBounds};
+
+#[openraft::add_async_trait]
+impl RaftLogReader<TypeConfig> for Arc<MemLogStore> {
+    async fn try_get_log_entries<RB>(&mut self, _range: RB) -> Result<Vec<Entry<TypeConfig>>, StorageError<TypeConfig>>
+    where
+        RB: RangeBounds<u64> + Clone + Debug + OptionalSend,
+    {
+        Ok(vec![])
+    }
+
+    async fn read_vote(&mut self) -> Result<Option<openraft::Vote<TypeConfig>>, StorageError<TypeConfig>> {
+        Ok(None)
+    }
+}
+
+#[openraft::add_async_trait]
+impl RaftLogStorage<TypeConfig> for Arc<MemLogStore> {
+    type LogReader = Arc<MemLogStore>;
+
+    async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<TypeConfig>> {
+        Ok(LogState { last_purged_log_id: None, last_log_id: None })
+    }
+
+    async fn save_committed(&mut self, _committed: Option<LogId<TypeConfig>>) -> Result<(), StorageError<TypeConfig>> {
+        Ok(())
+    }
+
+    async fn read_committed(&mut self) -> Result<Option<LogId<TypeConfig>>, StorageError<TypeConfig>> {
+        Ok(None)
+    }
+
+    async fn save_vote(&mut self, _vote: &openraft::Vote<TypeConfig>) -> Result<(), StorageError<TypeConfig>> {
+        Ok(())
+    }
+
+    async fn append<I>(&mut self, _entries: I, _callback: IOFlushed<TypeConfig>) -> Result<(), StorageError<TypeConfig>>
+    where
+        I: IntoIterator<Item = Entry<TypeConfig>> + OptionalSend,
+    {
+        Ok(())
+    }
+
+    async fn truncate(&mut self, _log_id: LogId<TypeConfig>) -> Result<(), StorageError<TypeConfig>> {
+        Ok(())
+    }
+
+    async fn purge(&mut self, _log_id: LogId<TypeConfig>) -> Result<(), StorageError<TypeConfig>> {
+        Ok(())
+    }
+
+    async fn get_log_reader(&mut self) -> Self::LogReader {
+        self.clone()
+    }
+}
+
 impl RaftSnapshotBuilder<TypeConfig> for Arc<StateMachineStore> {
     #[tracing::instrument(level = "trace", skip(self))]
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<TypeConfig>> {
@@ -83,14 +133,13 @@ impl RaftSnapshotBuilder<TypeConfig> for Arc<StateMachineStore> {
         } else {
             format!("--{}", idx)
         };
-        let meta = SnapshotMeta { last_log_id: last_applied, last_membership };
+        let meta = SnapshotMeta { last_log_id: last_applied, last_membership, snapshot_id };
         let snap = StoredSnapshot { meta: meta.clone(), data: data.clone() };
         *self.current_snapshot.write().await = Some(snap);
         Ok(Snapshot { meta, snapshot: Cursor::new(data) })
     }
 }
 
-#[async_trait]
 impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
     type SnapshotBuilder = Self;
 
@@ -134,7 +183,7 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
     }
 
     #[tracing::instrument(level = "trace", skip(self))]
-    async fn begin_receiving_snapshot(&mut self) -> Result<openraft::SnapshotDataOf<TypeConfig>, StorageError<TypeConfig>> {
+    async fn begin_receiving_snapshot(&mut self) -> Result<<TypeConfig as RaftTypeConfig>::SnapshotData, StorageError<TypeConfig>> {
         Ok(Cursor::new(Vec::new()))
     }
 
@@ -142,7 +191,7 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMeta<TypeConfig>,
-        snapshot: openraft::SnapshotDataOf<TypeConfig>,
+        snapshot: <TypeConfig as RaftTypeConfig>::SnapshotData,
     ) -> Result<(), StorageError<TypeConfig>> {
         let data = snapshot.into_inner();
         let snap = StoredSnapshot { meta: meta.clone(), data: data.clone() };
@@ -176,59 +225,5 @@ impl RaftStateMachine<TypeConfig> for Arc<StateMachineStore> {
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
         self.clone()
-    }
-}
-
-#[async_trait]
-impl RaftLogReader<TypeConfig> for LogStore<TypeConfig> {
-    async fn try_get_log_entries<RB>(&mut self, range: RB) -> Result<Vec<Entry<TypeConfig>>, StorageError<TypeConfig>>
-    where
-        RB: RangeBounds<u64> + Clone + Debug + OptionalSend,
-    {
-        RaftLogReader::<TypeConfig>::try_get_log_entries(self, range).await
-    }
-
-    async fn read_vote(&mut self) -> Result<Option<openraft::Vote<TypeConfig>>, StorageError<TypeConfig>> {
-        RaftLogReader::<TypeConfig>::read_vote(self).await
-    }
-}
-
-#[async_trait]
-impl RaftLogStorage<TypeConfig> for LogStore<TypeConfig> {
-    type LogReader = Self;
-
-    async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<TypeConfig>> {
-        RaftLogStorage::<TypeConfig>::get_log_state(self).await
-    }
-
-    async fn save_committed(&mut self, committed: Option<LogId<TypeConfig>>) -> Result<(), StorageError<TypeConfig>> {
-        RaftLogStorage::<TypeConfig>::save_committed(self, committed).await
-    }
-
-    async fn read_committed(&mut self) -> Result<Option<LogId<TypeConfig>>, StorageError<TypeConfig>> {
-        RaftLogStorage::<TypeConfig>::read_committed(self).await
-    }
-
-    async fn save_vote(&mut self, vote: &openraft::Vote<TypeConfig>) -> Result<(), StorageError<TypeConfig>> {
-        RaftLogStorage::<TypeConfig>::save_vote(self, vote).await
-    }
-
-    async fn append<I>(&mut self, entries: I, callback: IOFlushed<TypeConfig>) -> Result<(), StorageError<TypeConfig>>
-    where
-        I: IntoIterator<Item = Entry<TypeConfig>> + OptionalSend,
-    {
-        RaftLogStorage::<TypeConfig>::append(self, entries, callback).await
-    }
-
-    async fn truncate(&mut self, log_id: LogId<TypeConfig>) -> Result<(), StorageError<TypeConfig>> {
-        RaftLogStorage::<TypeConfig>::truncate(self, log_id).await
-    }
-
-    async fn purge(&mut self, log_id: LogId<TypeConfig>) -> Result<(), StorageError<TypeConfig>> {
-        RaftLogStorage::<TypeConfig>::purge(self, log_id).await
-    }
-
-    async fn get_log_reader(&mut self) -> Self::LogReader {
-        RaftLogStorage::<TypeConfig>::get_log_reader(self).await
     }
 }

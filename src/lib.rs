@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use pyo3::{prelude::*, wrap_pyfunction, types::PyModule};
 use pyo3::exceptions::PyRuntimeError;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::{
     net::SocketAddr,
     os::raw::{c_int, c_void},
@@ -21,6 +22,23 @@ use tokio::{
     net::{TcpListener, TcpStream},
     runtime::{Builder, Runtime},
 };
+
+mod storage;
+mod network;
+use storage::{new_mem_store, ClientRequest, ClientResponse};
+use network::NetworkFactory;
+use openraft::{Config, Raft};
+use openraft::impls::TokioRuntime;
+use std::collections::HashMap;
+
+// Declare the application TypeConfig for OpenRaft using our buffer request/response.
+openraft::declare_raft_types!(
+    /// Type configuration for raftmem: full-buffer snapshot entries.
+    pub TypeConfig:
+        D = ClientRequest,
+        R = ClientResponse,
+        AsyncRuntime = TokioRuntime,
+);
 
 // ---------- Tokio runtime (shared) ------------------------------------
 static RT: Lazy<Runtime> = Lazy::new(|| {
@@ -52,46 +70,89 @@ impl MmapBuf {
 #[derive(Clone)]
 struct Shared(Arc<MmapBuf>);
 
-// ---------- wire format -----------------------------------------------
-#[derive(Serialize, Deserialize)]
-struct Full {
-    vals: Vec<f64>,
-}
+/// Handle an incoming RPC over TCP, dispatching to the Raft node and returning a response.
+async fn handle_rpc(raft: Arc<Raft<TypeConfig>>, mut sock: TcpStream) {
+    use crate::network::RpcEnvelope;
+    // RPCOption not needed as v0.10 network traits no longer use options.
+    use openraft::raft::{AppendEntriesRequest, InstallSnapshotRequest, VoteRequest};
 
-// ---------- networking helpers ----------------------------------------
-async fn handle_peer(mut sock: TcpStream, shared: Shared) -> Result<()> {
-    let len = shared.0.mm.len();
-
-    loop {
-        // A mutable view onto this process’ own mmap:
-        let dst: &mut [u8] = unsafe {
-            std::slice::from_raw_parts_mut(shared.0.mm.as_ptr() as *mut u8, len)
-        };
-
-        // read_exact fills the mmap slice in-place – no intermediate buffer.
-        if sock.read_exact(dst).await.is_err() {
-            break;       // peer closed
+    // Read request length prefix
+    let mut len_buf = [0u8; 4];
+    if sock.read_exact(&mut len_buf).await.is_err() {
+        return;
+    }
+    let req_len = u32::from_be_bytes(len_buf) as usize;
+    let mut req_buf = vec![0u8; req_len];
+    if sock.read_exact(&mut req_buf).await.is_err() {
+        return;
+    }
+    // Deserialize envelope with generic JSON value
+    let raw: RpcEnvelope<serde_json::Value> = match serde_json::from_slice(&req_buf) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    // Dispatch based on URI and convert response to JSON value
+    let rpc_response = match raw.uri.as_str() {
+        "append" => {
+            let req: AppendEntriesRequest<TypeConfig> = match serde_json::from_value(raw.rpc) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            let res = match raft.append_entries(req).await {
+                Ok(res) => res,
+                Err(_) => return,
+            };
+            match serde_json::to_value(res) {
+                Ok(v) => v,
+                Err(_) => return,
+            }
         }
-    }
-    Ok(())
+        "snapshot" => {
+            let req: InstallSnapshotRequest<TypeConfig> = match serde_json::from_value(raw.rpc) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            let res = match raft.install_snapshot(req).await {
+                Ok(res) => res,
+                Err(_) => return,
+            };
+            match serde_json::to_value(res) {
+                Ok(v) => v,
+                Err(_) => return,
+            }
+        }
+        "vote" => {
+            let req: VoteRequest<TypeConfig> = match serde_json::from_value(raw.rpc) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            let res = match raft.vote(req).await {
+                Ok(res) => res,
+                Err(_) => return,
+            };
+            match serde_json::to_value(res) {
+                Ok(v) => v,
+                Err(_) => return,
+            }
+        }
+        _ => return,
+    };
+    let resp_env = RpcEnvelope { uri: raw.uri, rpc: rpc_response };
+    let send_buf = match serde_json::to_vec(&resp_env) {
+        Ok(buf) => buf,
+        Err(_) => return,
+    };
+    let len_bytes = (send_buf.len() as u32).to_be_bytes();
+    let _ = sock.write_all(&len_bytes).await;
+    let _ = sock.write_all(&send_buf).await;
 }
 
-
-async fn listener(listener: TcpListener, shared: Shared) -> Result<()> {
-    loop {
-        let (sock, _) = listener.accept().await?;
-        let shared2 = shared.clone();
-        tokio::spawn(async move {
-            let _ = handle_peer(sock, shared2).await;
-        });
-    }
-}
 
 // ---------- Python bindings -------------------------------------------
 #[pyclass]
 struct Node {
     shared: Shared,
-    peers: Vec<SocketAddr>,
+    raft: Arc<Raft<TypeConfig>>,
 }
 
 #[pymethods]
@@ -149,17 +210,23 @@ impl Node {
         Ok(ReadGuard { node: slf.into() })
     }
 
-    /// Manual flush helper if the user wants to push immediately.
+    /// Manual flush helper if the user wants to push immediately via Raft.
     fn flush(&self) -> PyResult<()> {
-        flush_now(self);
+        let raft = self.raft.clone();
+        let shared = self.shared.clone();
+        RT.spawn(async move {
+            let len = shared.0.mm.len();
+            let data = unsafe { std::slice::from_raw_parts(shared.0.mm.as_ptr(), len).to_vec() };
+            let _ = raft.client_write(ClientRequest { data }).await;
+        });
         Ok(())
     }
-    /// Construct a new Node by binding to `listen` and connecting to `peers`.
+    /// Construct a new Node by binding to `listen`, specifying our `node_id`, and peers to join.
     #[new]
-    fn new(listen: String, peers: Vec<String>) -> PyResult<Self> {
+    fn new(node_id: u64, listen: String, peers: Vec<String>) -> PyResult<Self> {
         Python::with_gil(|py| {
             let peer_slices: Vec<&str> = peers.iter().map(String::as_str).collect();
-            start(py, &listen, peer_slices)
+            start(py, node_id, &listen, peer_slices)
         })
     }
 }
@@ -167,76 +234,63 @@ impl Node {
 
 /// Start a new Node that listens on `listen` (and immediately spawns a Tokio task for it)
 /// and also knows how to broadcast to the given `peers`.
+/// Start a new Raft node that listens for Raft RPCs, joins the given peers, and applies state to the mmap.
 #[pyfunction]
-fn start(_py: Python<'_>, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
-    // 1) Create an anonymous mmap for 10 f64s:
+fn start(_py: Python<'_>, node_id: u64, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
+    // 1) Create an anonymous mmap for 10 f64s and wrap in Shared.
     let buf = MmapBuf::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
     let shared = Shared(Arc::new(buf));
 
-    // 2) Parse each peer address as SocketAddr:
-    let peer_addrs: Vec<SocketAddr> = peers
-        .into_iter()
-        .filter_map(|p| p.parse().ok())
-        .collect();
+    // 2) Initialize in-memory Raft log store and state machine store.
+    let (log_store, state_machine) = new_mem_store(shared.clone());
 
-
-    // 3) Make mmap read-only until a write() context, then bind the listener:
-    let len0 = shared.0.mm.len();
-    unsafe {
-        let ret = mprotect(shared.0.mm.as_ptr() as *mut _, len0, PROT_READ);
-        if ret != 0 {
-            return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in start()"));
-        }
+    // 3) Parse peer addresses and build network factory.
+    let mut peers_map = HashMap::new();
+    for p in peers {
+        let addr: SocketAddr = p.parse().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        peers_map.insert(addr.port() as u64, addr);
     }
-    // Bind the listener synchronously so EADDRINUSE pops up at import time:
-    // …bind std_listener…
+    let network = NetworkFactory::new(peers_map.clone());
+
+    // 4) Build and validate Raft config.
+    let mut cfg = Config::default();
+    cfg.validate().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let cfg = Arc::new(cfg);
+
+    // 5) Create Raft instance.
+    let raft = RT.block_on(async move {
+        Raft::new(node_id, cfg.clone(), network, log_store.clone(), state_machine.clone())
+            .await
+            .map_err(|e| PyRuntimeError::new_err(format!("Raft init error: {e}")))
+            .map(Arc::new)
+    })?;
+
+    // 6) Spawn RPC listener for Raft network-v1 TCP envelope protocol.
     let std_listener = std::net::TcpListener::bind(listen)
         .map_err(|e| PyRuntimeError::new_err(format!("bind {listen}: {e}")))?;
     std_listener.set_nonblocking(true)
         .map_err(|e| PyRuntimeError::new_err(format!("non-blocking: {e}")))?;
-
-    // — Remove the semicolon at the end, and move `?` outside the closure:
     let tokio_listener = {
         let _g = RT.enter();
-        tokio::net::TcpListener::from_std(std_listener)
+        TcpListener::from_std(std_listener)
             .map_err(|e| PyRuntimeError::new_err(format!("to-tokio: {e}")))?
     };
-
-    let shared2 = shared.clone();
+    let raft2 = raft.clone();
     RT.spawn(async move {
-        if let Err(e) = listener(tokio_listener, shared2).await {
-            eprintln!("raftmem listener error: {e}");
+        loop {
+            let (sock, _) = tokio_listener.accept().await.unwrap();
+            let raft_cloned = raft2.clone();
+            tokio::spawn(async move { handle_rpc(raft_cloned, sock).await });
         }
     });
 
-    println!("raftmem: started on {}", listen);
-    Ok(Node {
-        shared,
-        peers: peer_addrs,
-    })
-}
+    // 7) Bootstrap cluster membership (including self).
+    let mut membership: Vec<u64> = Vec::with_capacity(peers_map.len() + 1);
+    membership.push(node_id);
+    membership.extend(peers_map.keys().cloned());
+    RT.block_on(async { raft.change_membership(membership).await.map_err(|e| PyRuntimeError::new_err(format!("change_membership error: {e}"))) })?;
 
-async fn broadcast_raw(peers: &[SocketAddr], shared: Shared) {
-    // Unsafe is just to cast the mmap pointer to a byte slice.
-    let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(shared.0.mm.as_ptr(), shared.0.mm.len())
-    };
-
-    for &addr in peers {
-        if let Ok(mut s) = TcpStream::connect(addr).await {
-            let _ = s.write_all(bytes).await;      // <-- write the mmap slice itself
-        }
-    }
-}
-
-// ---------- helper -----------------------------------------------------
-fn flush_now(node: &Node) {
-    let peers  = node.peers.clone();
-    let shared = node.shared.clone();          // keep the mmap alive for the async task
-
-    RT.spawn(async move {
-        broadcast_raw(&peers, shared).await;
-    });
+    Ok(Node { shared, raft })
 }
 
 #[pyclass]
@@ -270,16 +324,24 @@ impl WriteGuard {
     }
 
     fn __exit__(&mut self, _t: &PyAny, _v: &PyAny, _tb: &PyAny) -> PyResult<()> {
-        Python::with_gil(|py| {
+        // Propose the current buffer as a Raft entry and wait for commit, then restore read-only protection.
+        let (raft, shared) = Python::with_gil(|py| {
             let cell = self.node.as_ref(py).borrow();
-            flush_now(&*cell);
-            let len = cell.shared.0.mm.len();
-            let ret = unsafe { mprotect(cell.shared.0.mm.as_ptr() as *mut _, len, PROT_READ) };
-            if ret != 0 {
-                return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in write() exit"));
-            }
-            Ok(())
-        })
+            (cell.raft.clone(), cell.shared.clone())
+        });
+        let len = shared.0.mm.len();
+        let data = unsafe { std::slice::from_raw_parts(shared.0.mm.as_ptr(), len).to_vec() };
+        RT.block_on(async {
+            raft.client_write(ClientRequest { data })
+                .await
+                .map_err(|e| PyRuntimeError::new_err(format!("client_write error: {e}")))?;
+            Ok::<(), PyRuntimeError>(())
+        })?;
+        let ret = unsafe { mprotect(shared.0.mm.as_ptr() as *mut _, len, PROT_READ) };
+        if ret != 0 {
+            return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in write() exit"));
+        }
+        Ok(())
     }
 }
 
