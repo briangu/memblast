@@ -16,6 +16,8 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 openraft    = { version = "0.9.18", features = ["serde"] }
 tracing     = "0.1"
+pyo3 = { version = "0.21", features = ["extension-module"] }
+
 
 
 
