@@ -58,8 +58,6 @@ use pyo3::types::PyModule;
 use pyo3::exceptions::PyValueError;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use parking_lot::RwLock;
 use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
 use std::io::ErrorKind;
 
@@ -69,20 +67,34 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 // ---------- in‑memory state -------------------------------------------------
 #[derive(Clone)]
 struct Shared {
-    buf: Arc<RwLock<[f64; 10]>>,
+    arr: Py<PyArray1<f64>>,
 }
 impl Shared {
     fn apply(&self, idx: usize, val: f64) {
-        if idx < 10 { self.buf.write()[idx] = val; }
+        Python::with_gil(|py| {
+            let array = self.arr.as_ref(py);
+            if let Ok(mut view) = array.try_readwrite() {
+                if let Ok(slice) = view.as_slice_mut() {
+                    if idx < slice.len() {
+                        slice[idx] = val;
+                    }
+                }
+            }
+        });
     }
-    fn snapshot(&self) -> [f64; 10] { *self.buf.read() }
+    fn get(&self, idx: usize) -> f64 {
+        Python::with_gil(|py| {
+            let array = self.arr.as_ref(py);
+            array.readonly().as_slice().unwrap()[idx]
+        })
+    }
 }
 
 // ---------- wire protocol ---------------------------------------------------
 #[derive(Debug, Serialize, Deserialize)]
 struct Update { idx: usize, val: f64 }
 
-async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
+async fn handle_peer(sock: TcpStream, state: Shared) -> Result<()> {
     let mut buf = vec![0u8; 128];
     loop {
         sock.readable().await?;
@@ -109,7 +121,7 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
     while let Some(u) = rx.recv().await.ok() {
         let data = serde_json::to_vec(&u)?;
         let mut alive = Vec::new();
-        for mut s in conns {
+        for s in conns {
             if s.writable().await.is_ok() {
                 if let Ok(n) = s.try_write(&data) {
                     if n == data.len() {
@@ -142,12 +154,12 @@ struct Node {
 #[pymethods]
 impl Node {
     #[getter]
-    fn ndarray<'py>(&self, py: Python<'py>) -> &'py PyArray1<f64> {
-        // Return a NumPy array view of the current state (copy of snapshot)
-        PyArray1::from_slice(py, &self.state.snapshot())
+    fn ndarray<'py>(&'py self, py: Python<'py>) -> &'py PyArray1<f64> {
+        // Expose the shared NumPy array itself
+        self.state.arr.as_ref(py)
     }
     fn flush(&self, idx: usize) {
-        let val = self.state.snapshot()[idx];
+        let val = self.state.get(idx);
         let _ = self.tx.try_send(Update { idx, val });
     }
 }
@@ -155,7 +167,8 @@ impl Node {
 #[pyfunction]
 #[pyo3(signature = (name, listen, peers))]
 fn start(py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>) -> PyResult<Node> {
-    let state = Shared { buf: Arc::new(RwLock::new([0.0; 10])) };
+    let array = PyArray1::<f64>::zeros(py, 10, false);
+    let state = Shared { arr: array.into_py(py) };
     let (tx, rx) = async_channel::bounded(1024);
 
     let listen_addr: SocketAddr = listen.parse()
