@@ -10,8 +10,8 @@ parser.add_argument('--peers', nargs='+', default=['0.0.0.0:7010', '0.0.0.0:7011
 args = parser.parse_args()
 
 node = raftmem.start("c", args.listen, args.peers)
-arr = node.ndarray
 
 while True:
-    print(arr)  # will follow writes from other nodes
+    with node.read() as arr:
+        print(arr)  # will follow writes from other nodes
     time.sleep(1)
