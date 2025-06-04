@@ -14,7 +14,9 @@ a = node.ndarray
 
 while True:
     for _ in range(8):
-        a[random.randrange(10)] = random.random() * 10
+        idx = random.randrange(10)
+        a[idx] = random.random() * 10
+        node.flush(idx)
     print(a)
     time.sleep(1)                    # write flushes on __exit__
 
