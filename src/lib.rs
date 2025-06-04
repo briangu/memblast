@@ -56,7 +56,7 @@ use numpy::PyArray1;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::exceptions::PyValueError;
-use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::net::SocketAddr;
 use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
 use std::io::ErrorKind;
@@ -91,23 +91,45 @@ impl Shared {
 }
 
 // ---------- wire protocol ---------------------------------------------------
-#[derive(Debug, Serialize, Deserialize)]
-struct Update { idx: usize, val: f64 }
+#[derive(Debug, Clone, Copy)]
+struct Update { idx: u32, val: f64 }
 
-async fn handle_peer(sock: TcpStream, state: Shared) -> Result<()> {
+impl Update {
+    const SIZE: usize = 4 + 8; // u32 + f64
+
+    fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[..4].copy_from_slice(&self.idx.to_le_bytes());
+        buf[4..].copy_from_slice(&self.val.to_le_bytes());
+        buf
+    }
+
+    fn from_bytes(buf: &[u8; Self::SIZE]) -> Self {
+        let mut idx_bytes = [0u8; 4];
+        idx_bytes.copy_from_slice(&buf[..4]);
+        let idx = u32::from_le_bytes(idx_bytes);
+
+        let mut val_bytes = [0u8; 8];
+        val_bytes.copy_from_slice(&buf[4..]);
+        let val = f64::from_le_bytes(val_bytes);
+
+        Self { idx, val }
+    }
+}
+
+async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
-    let mut buf = vec![0u8; 128];
+    let mut buf = [0u8; Update::SIZE];
     loop {
-        sock.readable().await?;
-        match sock.try_read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let upd: Update = serde_json::from_slice(&buf[..n])?;
+        match sock.read_exact(&mut buf).await {
+            Ok(_) => {
+                let upd = Update::from_bytes(&buf);
                 println!("recv from {:?}: {} -> {}", addr, upd.idx, upd.val);
-                state.apply(upd.idx, upd.val);
+                state.apply(upd.idx as usize, upd.val);
             }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => continue,
+            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e.into()),
         }
     }
@@ -129,7 +151,7 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
     }
     while let Some(u) = rx.recv().await.ok() {
         println!("broadcasting {} -> {}", u.idx, u.val);
-        let data = serde_json::to_vec(&u)?;
+        let data = u.to_bytes();
 
         for p in &peers {
             if !conns.iter().any(|(addr, _)| addr == p) {
@@ -145,33 +167,15 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
         }
 
         let mut alive = Vec::new();
-        for (addr, s) in conns {
-            let s = s;
-            if s.writable().await.is_ok() {
-                let mut sent = 0;
-                while sent < data.len() {
-                    match s.try_write(&data[sent..]) {
-                        Ok(0) => break,
-                        Ok(n) => sent += n,
-                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                            if s.writable().await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            println!("send failed to {}: {}", addr, e);
-                            break;
-                        }
-                    }
-                }
-                if sent == data.len() {
+        for (addr, mut s) in conns {
+            match s.write_all(&data).await {
+                Ok(_) => {
                     println!("sent to {}", addr);
                     alive.push((addr, s));
-                } else {
-                    println!("incomplete send to {}", addr);
                 }
-            } else {
-                println!("socket not writable {}", addr);
+                Err(e) => {
+                    println!("send failed to {}: {}", addr, e);
+                }
             }
         }
         conns = alive;
@@ -208,7 +212,7 @@ impl Node {
     fn flush(&self, idx: usize) {
         let val = self.state.get(idx);
         println!("{} flushing idx {} with {}", self.name, idx, val);
-        let _ = self.tx.try_send(Update { idx, val });
+        let _ = self.tx.try_send(Update { idx: idx as u32, val });
     }
 }
 
