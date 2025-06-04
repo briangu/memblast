@@ -61,6 +61,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::net::SocketAddr;
 use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
@@ -104,13 +105,20 @@ impl MmapBuf {
 }
 
 #[derive(Clone)]
-struct Shared(Arc<MmapBuf>);
+struct Shared {
+    mm: Arc<MmapBuf>,
+    lock: Arc<RwLock<()>>,    // reader/writer lock for memory access
+}
 
 impl Shared {
+    fn new(mm: MmapBuf) -> Self {
+        Self { mm: Arc::new(mm), lock: Arc::new(RwLock::new(())) }
+    }
+
     fn apply(&self, idx: usize, val: f64) {
-        if idx < self.0.elems() {
+        if idx < self.mm.elems() {
             unsafe {
-                let base = self.0.mm.as_ptr() as *mut f64;
+                let base = self.mm.mm.as_ptr() as *mut f64;
                 *base.add(idx) = val;
             }
         }
@@ -118,17 +126,17 @@ impl Shared {
 
     fn get(&self, idx: usize) -> f64 {
         unsafe {
-            let base = self.0.mm.as_ptr() as *const f64;
+            let base = self.mm.mm.as_ptr() as *const f64;
             *base.add(idx)
         }
     }
 
     fn elems(&self) -> usize {
-        self.0.elems()
+        self.mm.elems()
     }
 
     fn shape(&self) -> &[usize] {
-        self.0.shape()
+        self.mm.shape()
     }
 }
 
@@ -194,9 +202,15 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
                     println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
                     continue;
                 }
+                // apply update under write lock to coordinate with local reads/writes
+                let mut guard = state.lock.write();
+                let len = state.mm.byte_len();
+                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
                 for (i, v) in arr.iter().enumerate() {
                     state.apply(i, *v);
                 }
+                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
+                drop(guard);
             }
             Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
             Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
@@ -290,7 +304,7 @@ impl Node {
                 dims.len() as c_int,
                 dims.as_ptr() as *mut npy_intp,
                 strides.as_ptr() as *mut npy_intp,
-                self.state.0.ptr(),
+                self.state.mm.ptr(),
                 NPY_ARRAY_WRITEABLE,
                 std::ptr::null_mut(),
             );
@@ -308,25 +322,30 @@ impl Node {
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
-        let len = slf.state.0.byte_len();
+        let guard = slf.state.lock.write();
+        let len = slf.state.mm.byte_len();
         unsafe {
-            let ret = mprotect(slf.state.0.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE);
+            let ret = mprotect(slf.state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE);
             if ret != 0 {
                 return Err(PyRuntimeError::new_err("mprotect(PROT_READ|WRITE) failed in write()"));
             }
         }
-        Ok(WriteGuard { node: slf.into() })
+        // extend lifetime of guard to 'static for storage in Python object
+        let guard: RwLockWriteGuard<'static, ()> = unsafe { std::mem::transmute::<RwLockWriteGuard<'_, ()>, RwLockWriteGuard<'static, ()>>(guard) };
+        Ok(WriteGuard { node: slf.into(), guard: Some(guard) })
     }
 
     fn read<'py>(slf: PyRef<'py, Self>) -> PyResult<ReadGuard> {
-        let len = slf.state.0.byte_len();
+        let guard = slf.state.lock.read();
+        let len = slf.state.mm.byte_len();
         unsafe {
-            let ret = mprotect(slf.state.0.mm.as_ptr() as *mut _, len, PROT_READ);
+            let ret = mprotect(slf.state.mm.mm.as_ptr() as *mut _, len, PROT_READ);
             if ret != 0 {
                 return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in read()"));
             }
         }
-        Ok(ReadGuard { node: slf.into() })
+        let guard: RwLockReadGuard<'static, ()> = unsafe { std::mem::transmute::<RwLockReadGuard<'_, ()>, RwLockReadGuard<'static, ()>>(guard) };
+        Ok(ReadGuard { node: slf.into(), guard: Some(guard) })
     }
 }
 
@@ -334,9 +353,10 @@ fn flush_now(node: &Node) {
     node.flush(0);
 }
 
-#[pyclass]
+#[pyclass(unsendable)]
 struct WriteGuard {
     node: Py<Node>,
+    guard: Option<RwLockWriteGuard<'static, ()>>,
 }
 
 #[pymethods]
@@ -355,7 +375,7 @@ impl WriteGuard {
                 dims.len() as c_int,
                 dims.as_ptr() as *mut npy_intp,
                 strides.as_ptr() as *mut npy_intp,
-                cell.state.0.ptr(),
+                cell.state.mm.ptr(),
                 NPY_ARRAY_WRITEABLE,
                 cell.as_ptr(),
             );
@@ -367,19 +387,25 @@ impl WriteGuard {
         Python::with_gil(|py| {
             let cell = self.node.as_ref(py).borrow();
             flush_now(&*cell);
-            let len = cell.state.0.byte_len();
-            let ret = unsafe { mprotect(cell.state.0.mm.as_ptr() as *mut _, len, PROT_READ) };
+            let len = cell.state.mm.byte_len();
+            let ret = unsafe { mprotect(cell.state.mm.mm.as_ptr() as *mut _, len, PROT_READ) };
             if ret != 0 {
                 return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in write() exit"));
             }
             Ok(())
-        })
+        })?;
+        // drop the write lock
+        if let Some(g) = self.guard.take() {
+            drop(g);
+        }
+        Ok(())
     }
 }
 
-#[pyclass]
+#[pyclass(unsendable)]
 struct ReadGuard {
     node: Py<Node>,
+    guard: Option<RwLockReadGuard<'static, ()>>,
 }
 
 #[pymethods]
@@ -398,7 +424,7 @@ impl ReadGuard {
                 dims.len() as c_int,
                 dims.as_ptr() as *mut npy_intp,
                 strides.as_ptr() as *mut npy_intp,
-                cell.state.0.ptr(),
+                cell.state.mm.ptr(),
                 0,
                 cell.as_ptr(),
             );
@@ -409,13 +435,17 @@ impl ReadGuard {
     fn __exit__(&mut self, _t: &PyAny, _v: &PyAny, _tb: &PyAny) -> PyResult<()> {
         Python::with_gil(|py| {
             let cell = self.node.as_ref(py).borrow();
-            let len = cell.state.0.byte_len();
-            let ret = unsafe { mprotect(cell.state.0.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE) };
+            let len = cell.state.mm.byte_len();
+            let ret = unsafe { mprotect(cell.state.mm.mm.as_ptr() as *mut _, len, PROT_READ) };
             if ret != 0 {
-                return Err(PyRuntimeError::new_err("mprotect(PROT_READ|WRITE) failed in read() exit"));
+                return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in read() exit"));
             }
             Ok(())
-        })
+        })?;
+        if let Some(g) = self.guard.take() {
+            drop(g);
+        }
+        Ok(())
     }
 }
 
@@ -425,7 +455,7 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let state = Shared(Arc::new(buf));
+    let state = Shared::new(buf);
     let (tx, rx) = async_channel::bounded(1024);
 
     let listen_addr: SocketAddr = listen.parse()
@@ -437,8 +467,8 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     RUNTIME.spawn(broadcaster(peer_addrs, rx));
 
     unsafe {
-        let len0 = state.0.byte_len();
-        let ret = mprotect(state.0.mm.as_ptr() as *mut _, len0, PROT_READ);
+        let len0 = state.mm.byte_len();
+        let ret = mprotect(state.mm.mm.as_ptr() as *mut _, len0, PROT_READ);
         if ret != 0 {
             return Err(PyRuntimeError::new_err("mprotect(PROT_READ) failed in start()"));
         }
