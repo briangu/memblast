@@ -116,13 +116,13 @@ async fn handle_peer(sock: TcpStream, state: Shared) -> Result<()> {
 }
 
 async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>) -> Result<()> {
-    let mut conns = Vec::new();
-    for p in peers {
+    let mut conns: Vec<(SocketAddr, TcpStream)> = Vec::new();
+    for p in &peers {
         println!("connecting to peer {}", p);
-        match TcpStream::connect(p).await {
+        match TcpStream::connect(*p).await {
             Ok(s) => {
                 println!("connected to {}", p);
-                conns.push(s);
+                conns.push((*p, s));
             }
             Err(e) => println!("failed to connect to {}: {}", p, e),
         }
@@ -130,23 +130,48 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
     while let Some(u) = rx.recv().await.ok() {
         println!("broadcasting {} -> {}", u.idx, u.val);
         let data = serde_json::to_vec(&u)?;
+
+        for p in &peers {
+            if !conns.iter().any(|(addr, _)| addr == p) {
+                println!("reconnecting to {}", p);
+                match TcpStream::connect(*p).await {
+                    Ok(s) => {
+                        println!("connected to {}", p);
+                        conns.push((*p, s));
+                    }
+                    Err(e) => println!("connect failed to {}: {}", p, e),
+                }
+            }
+        }
+
         let mut alive = Vec::new();
-        for mut s in conns {
+        for (addr, s) in conns {
+            let s = s;
             if s.writable().await.is_ok() {
-                match s.try_write(&data) {
-                    Ok(n) if n == data.len() => {
-                        println!("sent to {:?}", s.peer_addr().ok());
-                        alive.push(s);
+                let mut sent = 0;
+                while sent < data.len() {
+                    match s.try_write(&data[sent..]) {
+                        Ok(0) => break,
+                        Ok(n) => sent += n,
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                            if s.writable().await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            println!("send failed to {}: {}", addr, e);
+                            break;
+                        }
                     }
-                    Ok(_) => println!("partial write to {:?}", s.peer_addr().ok()),
-                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                        println!("would block on {:?}", s.peer_addr().ok());
-                        alive.push(s);
-                    }
-                    Err(e) => println!("send failed to {:?}: {}", s.peer_addr().ok(), e),
+                }
+                if sent == data.len() {
+                    println!("sent to {}", addr);
+                    alive.push((addr, s));
+                } else {
+                    println!("incomplete send to {}", addr);
                 }
             } else {
-                println!("socket not writable {:?}", s.peer_addr().ok());
+                println!("socket not writable {}", addr);
             }
         }
         conns = alive;
