@@ -98,7 +98,7 @@ impl Shared {
     fn apply(&self, idx: usize, val: f64) {
         if idx < 10 {
             unsafe {
-                let base = self.0.mm.as_mut_ptr() as *mut f64;
+                let base = self.0.mm.as_ptr() as *mut f64;
                 *base.add(idx) = val;
             }
         }
