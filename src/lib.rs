@@ -254,6 +254,7 @@ impl Node {
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
+
         let len = slf.state.0.len();
         unsafe {
             let ret = mprotect(slf.state.0.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE);
@@ -391,7 +392,11 @@ fn start(py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>) -> PyResult
     }
 
     println!("node {} running on {}", name, listen);
-    Ok(Node { name: name.to_string(), state, tx })
+    Ok(Node {
+        name: name.to_string(),
+        state,
+        tx,
+    })
 }
 
 // ---------- module init ----------------------------------------------------
