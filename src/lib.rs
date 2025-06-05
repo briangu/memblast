@@ -16,7 +16,7 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::os::raw::{c_int, c_void};
 
-use openraft::{Config, Raft, AnyError};
+use openraft::{Config, Raft, AnyError, ServerState};
 use openraft::error::{RPCError, RaftError, Unreachable, InstallSnapshotError};
 use openraft::network::{RaftNetwork, RaftNetworkFactory, RPCOption};
 use openraft::storage::Adaptor;
@@ -283,6 +283,8 @@ struct Node {
     shape: Vec<usize>,
     len: usize,
     raft: Raft<openraft_memstore::TypeConfig>,
+    on_leader: Option<Py<PyAny>>,
+    on_follower: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -447,8 +449,16 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen, peers, shape=None))]
-fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Option<Vec<usize>>) -> PyResult<Node> {
+#[pyo3(signature = (name, listen, peers, shape=None, on_leader=None, on_follower=None))]
+fn start(
+    _py: Python<'_>,
+    name: &str,
+    listen: &str,
+    peers: Vec<&str>,
+    shape: Option<Vec<usize>>,
+    on_leader: Option<PyObject>,
+    on_follower: Option<PyObject>,
+) -> PyResult<Node> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -494,7 +504,50 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     }
 
     println!("node {} running on {} with shape {:?}", name, listen, shape);
-    Ok(Node { name: name.to_string(), state, tx, shape, len, raft })
+
+    let node = Node {
+        name: name.to_string(),
+        state,
+        tx,
+        shape,
+        len,
+        raft: raft.clone(),
+        on_leader: on_leader.clone(),
+        on_follower: on_follower.clone(),
+    };
+
+    if on_leader.is_some() || on_follower.is_some() {
+        let mut rx = raft.metrics();
+        let mut last = rx.borrow().state;
+        let leader_cb = on_leader.clone();
+        let follower_cb = on_follower.clone();
+        RUNTIME.spawn(async move {
+            loop {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+                let st = rx.borrow().state;
+                if st != last {
+                    if st == ServerState::Leader {
+                        if let Some(cb) = &leader_cb {
+                            Python::with_gil(|py| {
+                                let _ = cb.call0(py);
+                            });
+                        }
+                    } else if st == ServerState::Follower {
+                        if let Some(cb) = &follower_cb {
+                            Python::with_gil(|py| {
+                                let _ = cb.call0(py);
+                            });
+                        }
+                    }
+                    last = st;
+                }
+            }
+        });
+    }
+
+    Ok(node)
 }
 
 // ---------- module init ----------------------------------------------------
