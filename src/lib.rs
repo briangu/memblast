@@ -1,7 +1,3 @@
-// ===============================================================
-// raftmem_rs 0.6 — explicit‐batch flush only, no signal handling
-// ===============================================================
-
 use anyhow::Result;
 use memmap2::{MmapMut, MmapOptions};
 use libc::{mprotect, PROT_READ, PROT_WRITE};
@@ -10,7 +6,6 @@ use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use once_cell::sync::Lazy;
 use pyo3::{prelude::*, wrap_pyfunction, types::PyModule};
 use pyo3::exceptions::PyRuntimeError;
-use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     os::raw::{c_int, c_void},
@@ -53,7 +48,6 @@ impl MmapBuf {
 struct Shared(Arc<MmapBuf>);
 
 // ---------- wire format -----------------------------------------------
-#[derive(Serialize, Deserialize)]
 struct Full {
     vals: Vec<f64>,
 }
