@@ -741,6 +741,7 @@ dependencies = [
  "maplit",
  "openraft-macros",
  "rand",
+ "serde",
  "thiserror",
  "tokio",
  "tracing",
@@ -759,6 +760,19 @@ dependencies = [
  "quote",
  "semver",
  "syn 2.0.101",
+]
+
+[[package]]
+name = "openraft-memstore"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e77fc15f7e276324bfdb068d7596c0c74ed485c3dbe9cea3a657249acfeed7ef"
+dependencies = [
+ "openraft",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -958,6 +972,7 @@ dependencies = [
  "numpy",
  "once_cell",
  "openraft",
+ "openraft-memstore",
  "parking_lot",
  "pyo3",
  "pyo3-build-config",
