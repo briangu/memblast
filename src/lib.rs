@@ -199,7 +199,8 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
                     continue;
                 }
                 // apply update under write lock to coordinate with local reads/writes
-                let mut guard = state.lock.write();
+                // Acquire write lock while applying incoming update
+                let guard = state.lock.write();
                 let len = state.mm.byte_len();
                 unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
                 for (i, v) in arr.iter().enumerate() {
@@ -517,15 +518,15 @@ fn start(
     };
 
     if on_leader.is_some() || on_follower.is_some() {
+        // Subscribe to metric updates. `changed().await` only returns when
+        // Raft publishes new metrics, so this loop sleeps while there is no
+        // change.
         let mut rx = raft.metrics();
         let mut last = rx.borrow().state;
         let leader_cb = on_leader.clone();
         let follower_cb = on_follower.clone();
         RUNTIME.spawn(async move {
-            loop {
-                if rx.changed().await.is_err() {
-                    break;
-                }
+            while rx.changed().await.is_ok() {
                 let st = rx.borrow().state;
                 if st != last {
                     if st == ServerState::Leader {
