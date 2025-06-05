@@ -161,7 +161,11 @@ impl RaftNetworkFactory<openraft_memstore::TypeConfig> for DummyFactory {
 async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
+    let local_shape = state.shape().to_vec();
+    let local_bytes = state.mm.byte_len();
+
     loop {
+        // read the remote array shape
         let mut shape_len_buf = [0u8; 4];
         match sock.read_exact(&mut shape_len_buf).await {
             Ok(_) => {}
@@ -170,6 +174,7 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
         let shape_len = u32::from_le_bytes(shape_len_buf) as usize;
+
         let mut shape_bytes = vec![0u8; shape_len * 4];
         match sock.read_exact(&mut shape_bytes).await {
             Ok(_) => {}
@@ -177,40 +182,51 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
             Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e.into()),
         }
+
         let mut shape = Vec::with_capacity(shape_len);
         for i in 0..shape_len {
             let mut d = [0u8; 4];
             d.copy_from_slice(&shape_bytes[i * 4..(i + 1) * 4]);
             shape.push(u32::from_le_bytes(d) as usize);
         }
+
         let len: usize = shape.iter().product();
-        let mut data = vec![0u8; len * 8];
-        match sock.read_exact(&mut data).await {
-            Ok(_) => {
-                let mut arr = Vec::with_capacity(len);
-                for i in 0..len {
-                    let mut val_bytes = [0u8; 8];
-                    val_bytes.copy_from_slice(&data[i * 8..(i + 1) * 8]);
-                    arr.push(f64::from_le_bytes(val_bytes));
-                }
-                println!("recv from {:?}: {:?}", addr, arr);
-                if shape != state.shape() {
-                    println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
-                    continue;
-                }
-                // apply update under write lock to coordinate with local reads/writes
-                let mut guard = state.lock.write();
-                let len = state.mm.byte_len();
-                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
-                for (i, v) in arr.iter().enumerate() {
-                    state.apply(i, *v);
-                }
-                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
-                drop(guard);
+        let byte_len = len * 8;
+
+        if shape != local_shape {
+            println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
+            // consume incoming data but discard it
+            let mut discard = vec![0u8; byte_len];
+            match sock.read_exact(&mut discard).await {
+                Ok(_) => continue,
+                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+                Err(e) => return Err(e.into()),
             }
-            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-            Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-            Err(e) => return Err(e.into()),
+        } else {
+            // prepare memory for writing under the lock
+            let len = state.mm.byte_len();
+            {
+                let _guard = state.lock.write();
+                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
+            }
+
+            let dst: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(state.mm.mm.as_ptr() as *mut u8, local_bytes)
+            };
+
+            match sock.read_exact(dst).await {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+                Err(e) => return Err(e.into()),
+            }
+
+            // restore protection under the lock
+            {
+                let _guard = state.lock.write();
+                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
+            }
         }
     }
     println!("peer {:?} disconnected", addr);
