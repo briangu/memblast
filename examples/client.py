@@ -5,14 +5,15 @@ import numpy as np
 import raftmem
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--listen', default='0.0.0.0:7011')
-parser.add_argument('--peers', nargs='+', default=['0.0.0.0:7010', '0.0.0.0:7012'])
+parser.add_argument('--server', default='0.0.0.0:7011')
 args = parser.parse_args()
 
-node = raftmem.start("b", args.listen, args.peers, shape=[10,10])
+def on_update(data):
+    print(f"Update {data}")
+
+node = raftmem.start("b", server=args.server, shape=[1000], on_update=on_update)
 
 while True:
     with node.read() as arr:
         print(arr)  # will follow writes from A
     time.sleep(1)
-

@@ -4,18 +4,22 @@ import time
 import numpy as np
 import raftmem
 
+# ticker plant server
+# rust library listens for clients and updates shared memory on the listener
+#
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--listen', default='0.0.0.0:7010')
-parser.add_argument('--peers', nargs='+', default=['0.0.0.0:7011', '0.0.0.0:7012'])
 args = parser.parse_args()
 
-node = raftmem.start("a", args.listen, args.peers, shape=[10,10])
+node = raftmem.start("a", listen=args.listen, shape=[1000])
 
+idx = 0
 while True:
     with node.write() as a:
-        for _ in range(8):
-            idx = random.randrange(10)
-            a[idx] = random.random() * 10
+        a[idx] = random.random() * 10
+        a.update({"position": idx})
+    idx = (idx + 1) % 1000
     with node.read() as arr:
         print(arr)
     time.sleep(1)                    # write flushes on __exit__
