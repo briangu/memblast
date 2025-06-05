@@ -9,7 +9,7 @@ parser.add_argument('--listen', default='0.0.0.0:7010')
 parser.add_argument('--peers', nargs='+', default=['0.0.0.0:7011', '0.0.0.0:7012'])
 args = parser.parse_args()
 
-node = raftmem.start("a", args.listen, args.peers)
+node = raftmem.start("a", args.listen, args.peers, shape=[10,10])
 
 while True:
     with node.write() as a:
