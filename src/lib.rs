@@ -146,11 +146,12 @@ impl DummyNetwork {
         sock.write_all(&len).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
         sock.write_all(&data).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
 
-        let resp: Result<T> = read_json(&mut sock).await;
+        let resp: Result<Resp> = read_json(&mut sock).await;
         match resp {
             Ok(resp) => Ok(resp),
-            Err(e)  => {
-                Err(RaftError::Network(openraft::error::NetworkError::new(&e)))
+            Err(e) => {
+                let any = AnyError::error(e.to_string());
+                Err(RPCError::Network(openraft::error::NetworkError::new(&any)))
             }
         }
     }
