@@ -15,12 +15,16 @@ use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::os::raw::{c_int, c_void};
+use std::collections::HashMap;
 
 use openraft::{Config, Raft, AnyError};
 use openraft::error::{RPCError, RaftError, Unreachable, InstallSnapshotError};
 use openraft::network::{RaftNetwork, RaftNetworkFactory, RPCOption};
 use openraft::storage::Adaptor;
 use openraft_memstore::MemStore;
+
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use serde_json;
 
 
 // ---------- global Tokio runtime (one per process) -------------------------
@@ -118,115 +122,200 @@ impl Update {
 
 // ---------- raft network ----------------------------------------------------
 
-#[derive(Clone, Default)]
-struct DummyNetwork;
+#[derive(Clone)]
+struct DummyNetwork {
+    addr: SocketAddr,
+}
+
+impl DummyNetwork {
+    async fn send_rpc<Req, Resp, Err>(&self, id: u8, req: &Req) -> Result<Resp, RPCError<u64, (), RaftError<u64, Err>>>
+    where
+        Req: Serialize,
+        Resp: DeserializeOwned,
+        Err: std::error::Error + DeserializeOwned,
+    {
+        let mut sock = TcpStream::connect(self.addr)
+            .await
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
+
+        let data = serde_json::to_vec(req)
+            .map_err(|e| RPCError::Network(openraft::error::NetworkError::new(&e)))?;
+        let len = (data.len() as u32).to_le_bytes();
+        sock.write_all(&[id]).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
+        sock.write_all(&len).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
+        sock.write_all(&data).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
+
+        let mut len_buf = [0u8; 4];
+        sock.read_exact(&mut len_buf).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
+        let resp_len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; resp_len];
+        sock.read_exact(&mut buf).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
+        let resp = serde_json::from_slice(&buf)
+            .map_err(|e| RPCError::Network(openraft::error::NetworkError::new(&e)))?;
+        Ok(resp)
+    }
+}
 
 impl RaftNetwork<openraft_memstore::TypeConfig> for DummyNetwork {
     async fn append_entries(
         &mut self,
-        _rpc: openraft::raft::AppendEntriesRequest<openraft_memstore::TypeConfig>,
+        rpc: openraft::raft::AppendEntriesRequest<openraft_memstore::TypeConfig>,
         _option: RPCOption,
     ) -> Result<openraft::raft::AppendEntriesResponse<u64>, RPCError<u64, (), RaftError<u64>>> {
-        Err(RPCError::Unreachable(Unreachable::new(&AnyError::error("no network"))))
+        self.send_rpc::<_, _, openraft::error::Infallible>(1, &rpc).await
     }
 
     async fn install_snapshot(
         &mut self,
-        _rpc: openraft::raft::InstallSnapshotRequest<openraft_memstore::TypeConfig>,
+        rpc: openraft::raft::InstallSnapshotRequest<openraft_memstore::TypeConfig>,
         _option: RPCOption,
     ) -> Result<openraft::raft::InstallSnapshotResponse<u64>, RPCError<u64, (), RaftError<u64, InstallSnapshotError>>> {
-        Err(RPCError::Unreachable(Unreachable::new(&AnyError::error("no network"))))
+        self.send_rpc::<_, _, InstallSnapshotError>(2, &rpc).await
     }
 
     async fn vote(
         &mut self,
-        _rpc: openraft::raft::VoteRequest<u64>,
+        rpc: openraft::raft::VoteRequest<u64>,
         _option: RPCOption,
     ) -> Result<openraft::raft::VoteResponse<u64>, RPCError<u64, (), RaftError<u64>>> {
-        Err(RPCError::Unreachable(Unreachable::new(&AnyError::error("no network"))))
+        self.send_rpc::<_, _, openraft::error::Infallible>(3, &rpc).await
     }
 }
 
-#[derive(Clone, Default)]
-struct DummyFactory;
+#[derive(Clone)]
+struct DummyFactory {
+    addrs: Arc<HashMap<u64, SocketAddr>>,
+}
+
+impl DummyFactory {
+    fn new(map: HashMap<u64, SocketAddr>) -> Self {
+        Self { addrs: Arc::new(map) }
+    }
+}
 
 impl RaftNetworkFactory<openraft_memstore::TypeConfig> for DummyFactory {
     type Network = DummyNetwork;
 
-    async fn new_client(&mut self, _target: u64, _node: &()) -> Self::Network {
-        DummyNetwork
+    async fn new_client(&mut self, target: u64, _node: &()) -> Self::Network {
+        let addr = *self.addrs.get(&target).expect("unknown target");
+        DummyNetwork { addr }
     }
 }
 
-async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
+async fn write_json<T: Serialize>(sock: &mut TcpStream, v: &T) -> Result<()> {
+    let data = serde_json::to_vec(v)?;
+    let len = (data.len() as u32).to_le_bytes();
+    sock.write_all(&len).await?;
+    sock.write_all(&data).await?;
+    Ok(())
+}
+
+async fn read_json<T: DeserializeOwned>(sock: &mut TcpStream) -> Result<T> {
+    let mut len_buf = [0u8; 4];
+    sock.read_exact(&mut len_buf).await?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    sock.read_exact(&mut buf).await?;
+    Ok(serde_json::from_slice(&buf)?)
+}
+
+async fn handle_peer(mut sock: TcpStream, state: Shared, raft: Raft<openraft_memstore::TypeConfig>) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
     let local_shape = state.shape().to_vec();
     let local_bytes = state.mm.byte_len();
 
     loop {
-        // read the remote array shape
-        let mut shape_len_buf = [0u8; 4];
-        match sock.read_exact(&mut shape_len_buf).await {
-            Ok(_) => {}
-            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-            Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-            Err(e) => return Err(e.into()),
-        }
-        let shape_len = u32::from_le_bytes(shape_len_buf) as usize;
-
-        let mut shape_bytes = vec![0u8; shape_len * 4];
-        match sock.read_exact(&mut shape_bytes).await {
+        let mut t = [0u8; 1];
+        match sock.read_exact(&mut t).await {
             Ok(_) => {}
             Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
             Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e.into()),
         }
 
-        let mut shape = Vec::with_capacity(shape_len);
-        for i in 0..shape_len {
-            let mut d = [0u8; 4];
-            d.copy_from_slice(&shape_bytes[i * 4..(i + 1) * 4]);
-            shape.push(u32::from_le_bytes(d) as usize);
-        }
+        match t[0] {
+            0 => {
+                // read the remote array shape
+                let mut shape_len_buf = [0u8; 4];
+                match sock.read_exact(&mut shape_len_buf).await {
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+                    Err(e) => return Err(e.into()),
+                }
+                let shape_len = u32::from_le_bytes(shape_len_buf) as usize;
 
-        let len: usize = shape.iter().product();
-        let byte_len = len * 8;
+                let mut shape_bytes = vec![0u8; shape_len * 4];
+                match sock.read_exact(&mut shape_bytes).await {
+                    Ok(_) => {}
+                    Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                    Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+                    Err(e) => return Err(e.into()),
+                }
 
-        if shape != local_shape {
-            println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
-            // consume incoming data but discard it
-            let mut discard = vec![0u8; byte_len];
-            match sock.read_exact(&mut discard).await {
-                Ok(_) => continue,
-                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-                Err(e) => return Err(e.into()),
+                let mut shape = Vec::with_capacity(shape_len);
+                for i in 0..shape_len {
+                    let mut d = [0u8; 4];
+                    d.copy_from_slice(&shape_bytes[i * 4..(i + 1) * 4]);
+                    shape.push(u32::from_le_bytes(d) as usize);
+                }
+
+                let len: usize = shape.iter().product();
+                let byte_len = len * 8;
+
+                if shape != local_shape {
+                    println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
+                    // consume incoming data but discard it
+                    let mut discard = vec![0u8; byte_len];
+                    match sock.read_exact(&mut discard).await {
+                        Ok(_) => continue,
+                        Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                        Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+                        Err(e) => return Err(e.into()),
+                    }
+                } else {
+                    // prepare memory for writing under the lock
+                    let len = state.mm.byte_len();
+                    {
+                        let _guard = state.lock.write();
+                        unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
+                    }
+
+                    let dst: &mut [u8] = unsafe {
+                        std::slice::from_raw_parts_mut(state.mm.mm.as_ptr() as *mut u8, local_bytes)
+                    };
+
+                    match sock.read_exact(dst).await {
+                        Ok(_) => {}
+                        Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                        Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+                        Err(e) => return Err(e.into()),
+                    }
+
+                    // restore protection under the lock
+                    {
+                        let _guard = state.lock.write();
+                        unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
+                    }
+                }
             }
-        } else {
-            // prepare memory for writing under the lock
-            let len = state.mm.byte_len();
-            {
-                let _guard = state.lock.write();
-                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
+            1 => {
+                let req: openraft::raft::AppendEntriesRequest<openraft_memstore::TypeConfig> = read_json(&mut sock).await?;
+                let resp = raft.append_entries(req).await;
+                write_json(&mut sock, &resp).await?;
             }
-
-            let dst: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(state.mm.mm.as_ptr() as *mut u8, local_bytes)
-            };
-
-            match sock.read_exact(dst).await {
-                Ok(_) => {}
-                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-                Err(e) => return Err(e.into()),
+            2 => {
+                let req: openraft::raft::InstallSnapshotRequest<openraft_memstore::TypeConfig> = read_json(&mut sock).await?;
+                let resp = raft.install_snapshot(req).await;
+                write_json(&mut sock, &resp).await?;
             }
-
-            // restore protection under the lock
-            {
-                let _guard = state.lock.write();
-                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
+            3 => {
+                let req: openraft::raft::VoteRequest<u64> = read_json(&mut sock).await?;
+                let resp = raft.vote(req).await;
+                write_json(&mut sock, &resp).await?;
             }
+            _ => break,
         }
     }
     println!("peer {:?} disconnected", addr);
@@ -247,7 +336,10 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
     }
     while let Some(u) = rx.recv().await.ok() {
         println!("broadcasting full array shape {:?}", u.shape);
-        let data = u.to_bytes();
+        let payload = u.to_bytes();
+        let mut data = Vec::with_capacity(1 + payload.len());
+        data.push(0); // message type 0 for array update
+        data.extend_from_slice(&payload);
 
         for p in &peers {
             if !conns.iter().any(|(addr, _)| addr == p) {
@@ -279,14 +371,15 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
     Ok(())
 }
 
-async fn listener(addr: SocketAddr, state: Shared) -> Result<()> {
+async fn listener(addr: SocketAddr, state: Shared, raft: Raft<openraft_memstore::TypeConfig>) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     loop {
         let (sock, peer) = lst.accept().await?;
         println!("accepted connection from {}", peer);
         let st = state.clone();
-        tokio::spawn(async move { let _ = handle_peer(sock, st).await; });
+        let rf = raft.clone();
+        tokio::spawn(async move { let _ = handle_peer(sock, st, rf).await; });
     }
 }
 
@@ -299,6 +392,8 @@ struct Node {
     shape: Vec<usize>,
     len: usize,
     raft: Raft<openraft_memstore::TypeConfig>,
+    peers: HashMap<u64, SocketAddr>,
+    listen: SocketAddr,
 }
 
 #[pymethods]
@@ -477,6 +572,11 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
 
     // setup raft
     let node_id = listen_addr.port() as u64;
+    let mut peer_map: HashMap<u64, SocketAddr> = HashMap::new();
+    peer_map.insert(node_id, listen_addr);
+    for p in &peer_addrs {
+        peer_map.insert(p.port() as u64, *p);
+    }
     let mut members = std::collections::BTreeSet::new();
     members.insert(node_id);
     for p in &peer_addrs {
@@ -487,7 +587,7 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
         let cfg = Arc::new(Config::default().validate().unwrap());
         let store = Arc::new(MemStore::new());
         let (log_store, sm_store) = Adaptor::<openraft_memstore::TypeConfig, _>::new(store);
-        let network = DummyFactory::default();
+        let network = DummyFactory::new(peer_map.clone());
         let r = Raft::new(node_id, cfg.clone(), network, log_store, sm_store)
             .await
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -498,7 +598,8 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     })?;
 
     let st_clone = state.clone();
-    RUNTIME.spawn(listener(listen_addr, st_clone));
+    let raft_clone = raft.clone();
+    RUNTIME.spawn(listener(listen_addr, st_clone, raft_clone));
     RUNTIME.spawn(broadcaster(peer_addrs, rx));
 
     unsafe {
@@ -510,7 +611,7 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     }
 
     println!("node {} running on {} with shape {:?}", name, listen, shape);
-    Ok(Node { name: name.to_string(), state, tx, shape, len, raft })
+    Ok(Node { name: name.to_string(), state, tx, shape, len, raft, peers: peer_map, listen: listen_addr })
 }
 
 // ---------- module init ----------------------------------------------------

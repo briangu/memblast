@@ -976,6 +976,8 @@ dependencies = [
  "parking_lot",
  "pyo3",
  "pyo3-build-config",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
