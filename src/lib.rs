@@ -15,6 +15,12 @@ use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
 use std::io::ErrorKind;
 use std::sync::Arc;
 use std::os::raw::{c_int, c_void};
+use std::fs::{OpenOptions, File};
+use std::path::PathBuf;
+use std::io::{Write, Read, Seek, SeekFrom};
+use tokio::time::{interval, Duration};
+use tokio::sync::Mutex;
+use lz4_flex::block::compress_prepend_size;
 
 use openraft::{Config, Raft, AnyError};
 use openraft::error::{RPCError, RaftError, Unreachable, InstallSnapshotError};
@@ -62,6 +68,36 @@ impl MmapBuf {
 struct Shared {
     mm: Arc<MmapBuf>,
     lock: Arc<RwLock<()>>,    // reader/writer lock for memory access
+}
+
+struct Wal {
+    file: File,
+    path: PathBuf,
+}
+
+impl Wal {
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).read(true).open(&path)?;
+        Ok(Self { file, path })
+    }
+
+    fn append(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(&(data.len() as u32).to_le_bytes())?;
+        self.file.write_all(data)?;
+        self.file.flush()
+    }
+
+    fn compress(&mut self) -> std::io::Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut buf = Vec::new();
+        self.file.read_to_end(&mut buf)?;
+        let compressed = compress_prepend_size(&buf);
+        let compressed_path = self.path.with_extension("wal.lz4");
+        std::fs::write(&compressed_path, &compressed)?;
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
 }
 
 impl Shared {
@@ -158,7 +194,7 @@ impl RaftNetworkFactory<openraft_memstore::TypeConfig> for DummyFactory {
     }
 }
 
-async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
+async fn handle_peer(mut sock: TcpStream, state: Shared, wal: Arc<tokio::sync::Mutex<Wal>>) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
     let local_shape = state.shape().to_vec();
@@ -227,6 +263,16 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
                 let _guard = state.lock.write();
                 unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
             }
+
+            // append to WAL
+            let mut arr = Vec::with_capacity(state.elems());
+            for i in 0..state.elems() {
+                arr.push(state.get(i));
+            }
+            let update = Update { shape: local_shape.iter().map(|&d| d as u32).collect(), arr };
+            let bytes = update.to_bytes();
+            let mut w = wal.lock().await;
+            let _ = w.append(&bytes);
         }
     }
     println!("peer {:?} disconnected", addr);
@@ -279,14 +325,15 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
     Ok(())
 }
 
-async fn listener(addr: SocketAddr, state: Shared) -> Result<()> {
+async fn listener(addr: SocketAddr, state: Shared, wal: Arc<Mutex<Wal>>) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     loop {
         let (sock, peer) = lst.accept().await?;
         println!("accepted connection from {}", peer);
         let st = state.clone();
-        tokio::spawn(async move { let _ = handle_peer(sock, st).await; });
+        let wl = wal.clone();
+        tokio::spawn(async move { let _ = handle_peer(sock, st, wl).await; });
     }
 }
 
@@ -299,6 +346,8 @@ struct Node {
     shape: Vec<usize>,
     len: usize,
     raft: Raft<openraft_memstore::TypeConfig>,
+    wal: Arc<Mutex<Wal>>,
+    on_leader: Option<PyObject>,
 }
 
 #[pymethods]
@@ -331,7 +380,14 @@ impl Node {
         }
         println!("{} flushing full array", self.name);
         let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
-        let _ = self.tx.try_send(Update { shape, arr });
+        let upd = Update { shape, arr };
+        let bytes = upd.to_bytes();
+        let wal = self.wal.clone();
+        RUNTIME.block_on(async {
+            let mut w = wal.lock().await;
+            let _ = w.append(&bytes);
+        });
+        let _ = self.tx.try_send(upd);
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
@@ -359,6 +415,22 @@ impl Node {
         }
         let guard: RwLockReadGuard<'static, ()> = unsafe { std::mem::transmute::<RwLockReadGuard<'_, ()>, RwLockReadGuard<'static, ()>>(guard) };
         Ok(ReadGuard { node: slf.into(), guard: Some(guard) })
+    }
+
+    fn set_on_leader(&mut self, cb: PyObject) {
+        self.on_leader = Some(cb.clone());
+        let raft = self.raft.clone();
+        RUNTIME.spawn(async move {
+            let mut metrics = raft.metrics();
+            while metrics.changed().await.is_ok() {
+                let m = metrics.borrow().clone();
+                if m.current_leader == Some(m.id) {
+                    Python::with_gil(|py| {
+                        let _ = cb.call0(py);
+                    });
+                }
+            }
+        });
     }
 }
 
@@ -471,6 +543,11 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     let state = Shared::new(buf);
     let (tx, rx) = async_channel::bounded(1024);
 
+    let wal_path = format!("{}.wal", name);
+    let wal = Wal::open(PathBuf::from(&wal_path))
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let wal = Arc::new(Mutex::new(wal));
+
     let listen_addr: SocketAddr = listen.parse()
         .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
     let peer_addrs: Vec<SocketAddr> = peers.iter().filter_map(|p| p.parse().ok()).collect();
@@ -498,8 +575,19 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     })?;
 
     let st_clone = state.clone();
-    RUNTIME.spawn(listener(listen_addr, st_clone));
+    let wl_clone = wal.clone();
+    RUNTIME.spawn(listener(listen_addr, st_clone, wl_clone));
     RUNTIME.spawn(broadcaster(peer_addrs, rx));
+
+    let wl_comp = wal.clone();
+    RUNTIME.spawn(async move {
+        let mut intv = interval(Duration::from_secs(30));
+        loop {
+            intv.tick().await;
+            let mut w = wl_comp.lock().await;
+            let _ = w.compress();
+        }
+    });
 
     unsafe {
         let len0 = state.mm.byte_len();
@@ -510,7 +598,7 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     }
 
     println!("node {} running on {} with shape {:?}", name, listen, shape);
-    Ok(Node { name: name.to_string(), state, tx, shape, len, raft })
+    Ok(Node { name: name.to_string(), state, tx, shape, len, raft, wal, on_leader: None })
 }
 
 // ---------- module init ----------------------------------------------------
