@@ -2,6 +2,7 @@ use anyhow::Result;
 use memmap2::{MmapMut, MmapOptions};
 use libc::{mprotect, PROT_READ, PROT_WRITE};
 use once_cell::sync::Lazy;
+use std::cell::RefCell;
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use pyo3::prelude::*;
@@ -73,18 +74,26 @@ impl Shared {
 #[derive(Debug, Clone)]
 struct Update {
     shape: Vec<u32>,
-    arr: Vec<f64>,
+    dirty: Vec<u8>,
+    vals: Vec<f64>,
 }
 
 impl Update {
     fn to_bytes(&self) -> Vec<u8> {
         let shape_len = self.shape.len() as u32;
-        let mut buf = Vec::with_capacity(4 + self.shape.len() * 4 + self.arr.len() * 8);
+        let bit_len = self.dirty.len() as u32;
+        let val_len = self.vals.len() as u32;
+        let mut buf = Vec::with_capacity(
+            4 + self.shape.len() * 4 + 4 + 4 + self.dirty.len() + self.vals.len() * 8,
+        );
         buf.extend_from_slice(&shape_len.to_le_bytes());
         for d in &self.shape {
             buf.extend_from_slice(&d.to_le_bytes());
         }
-        for v in &self.arr {
+        buf.extend_from_slice(&bit_len.to_le_bytes());
+        buf.extend_from_slice(&val_len.to_le_bytes());
+        buf.extend_from_slice(&self.dirty);
+        for v in &self.vals {
             buf.extend_from_slice(&v.to_le_bytes());
         }
         buf
@@ -124,12 +133,30 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
         }
 
         let len: usize = shape.iter().product();
-        let byte_len = len * 8;
+
+        // read bitmask and value lengths
+        let mut bit_len_buf = [0u8; 4];
+        match sock.read_exact(&mut bit_len_buf).await {
+            Ok(_) => {}
+            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+            Err(e) => return Err(e.into()),
+        }
+        let bit_len = u32::from_le_bytes(bit_len_buf) as usize;
+
+        let mut val_len_buf = [0u8; 4];
+        match sock.read_exact(&mut val_len_buf).await {
+            Ok(_) => {}
+            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+            Err(e) => return Err(e.into()),
+        }
+        let val_len = u32::from_le_bytes(val_len_buf) as usize;
 
         if shape != local_shape {
             println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
-            // consume incoming data but discard it
-            let mut discard = vec![0u8; byte_len];
+            // discard incoming data
+            let mut discard = vec![0u8; bit_len + val_len * 8];
             match sock.read_exact(&mut discard).await {
                 Ok(_) => continue,
                 Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
@@ -137,22 +164,44 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
                 Err(e) => return Err(e.into()),
             }
         } else {
-            let len = state.mm.byte_len();
-            state.seq.fetch_add(1, Ordering::AcqRel);
-            unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
-
-            let dst: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(state.mm.mm.as_ptr() as *mut u8, local_bytes)
-            };
-
-            match sock.read_exact(dst).await {
+            let mut mask = vec![0u8; bit_len];
+            match sock.read_exact(&mut mask).await {
                 Ok(_) => {}
                 Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
                 Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
                 Err(e) => return Err(e.into()),
             }
 
-            unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
+            let mut vals_buf = vec![0u8; val_len * 8];
+            match sock.read_exact(&mut vals_buf).await {
+                Ok(_) => {}
+                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+                Err(e) => return Err(e.into()),
+            }
+
+            let mut vals = Vec::with_capacity(val_len);
+            for i in 0..val_len {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&vals_buf[i * 8..(i + 1) * 8]);
+                vals.push(f64::from_le_bytes(b));
+            }
+
+            let len_bytes = state.mm.byte_len();
+            state.seq.fetch_add(1, Ordering::AcqRel);
+            unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len_bytes, PROT_READ | PROT_WRITE); }
+
+            let base = state.mm.mm.as_ptr() as *mut f64;
+            let mut val_iter = vals.into_iter();
+            for i in 0..len {
+                if i / 8 < mask.len() && (mask[i / 8] >> (i % 8)) & 1 == 1 {
+                    if let Some(v) = val_iter.next() {
+                        unsafe { *base.add(i) = v; }
+                    }
+                }
+            }
+
+            unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len_bytes, PROT_READ); }
             state.seq.fetch_add(1, Ordering::Release);
         }
     }
@@ -173,7 +222,7 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
         }
     }
     while let Some(u) = rx.recv().await.ok() {
-        println!("broadcasting full array shape {:?}", u.shape);
+        println!("broadcasting update shape {:?} dirty {} bytes", u.shape, u.dirty.len());
         let data = u.to_bytes();
 
         for p in &peers {
@@ -225,6 +274,7 @@ struct Node {
     tx: async_channel::Sender<Update>,
     shape: Vec<usize>,
     len: usize,
+    scratch: RefCell<Vec<f64>>, // reusable buffer for reads and diffing
 }
 
 #[pymethods]
@@ -251,13 +301,30 @@ impl Node {
         }
     }
     fn flush(&self, _idx: usize) {
-        let mut arr = Vec::with_capacity(self.len);
-        for i in 0..self.len {
-            arr.push(self.state.get(i));
+        let mut scratch = self.scratch.borrow_mut();
+        if scratch.len() != self.len {
+            scratch.resize(self.len, 0.0);
         }
-        println!("{} flushing full array", self.name);
+
+        let mut dirty = vec![0u8; (self.len + 7) / 8];
+        let mut vals = Vec::new();
+
+        for i in 0..self.len {
+            let v = self.state.get(i);
+            if scratch[i] != v {
+                dirty[i / 8] |= 1 << (i % 8);
+                vals.push(v);
+                scratch[i] = v;
+            }
+        }
+
+        if vals.is_empty() {
+            return;
+        }
+
+        println!("{} flushing {} values", self.name, vals.len());
         let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
-        let _ = self.tx.try_send(Update { shape, arr });
+        let _ = self.tx.try_send(Update { shape, dirty, vals });
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
@@ -273,7 +340,12 @@ impl Node {
     }
 
     fn read<'py>(slf: PyRef<'py, Self>) -> PyResult<ReadGuard> {
-        let mut data = vec![0f64; slf.len];
+        let py = slf.py();
+        let node_ref: Py<Node> = unsafe { Py::from_borrowed_ptr(py, slf.as_ptr()) };
+        let mut scratch = slf.scratch.borrow_mut();
+        if scratch.len() != slf.len {
+            scratch.resize(slf.len, 0.0);
+        }
         loop {
             let start = slf.state.seq.load(Ordering::Acquire);
             if start % 2 == 1 { continue; }
@@ -281,14 +353,15 @@ impl Node {
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     slf.state.mm.mm.as_ptr() as *const f64,
-                    data.as_mut_ptr(),
+                    scratch.as_mut_ptr(),
                     slf.len,
                 );
             }
             fence(Ordering::Acquire);
             if slf.state.seq.load(Ordering::Relaxed) == start { break; }
         }
-        Ok(ReadGuard { arr: Some(data) })
+        let data = std::mem::take(&mut *scratch);
+        Ok(ReadGuard { node: node_ref, arr: Some(data) })
     }
 }
 
@@ -345,6 +418,7 @@ impl WriteGuard {
 
 #[pyclass(unsendable)]
 struct ReadGuard {
+    node: Py<Node>,
     arr: Option<Vec<f64>>,
 }
 
@@ -373,8 +447,13 @@ impl ReadGuard {
     }
 
     fn __exit__(&mut self, _t: &PyAny, _v: &PyAny, _tb: &PyAny) -> PyResult<()> {
-        self.arr.take();
-        Ok(())
+        Python::with_gil(|py| {
+            if let Some(arr) = self.arr.take() {
+                let cell = self.node.as_ref(py).borrow();
+                *cell.scratch.borrow_mut() = arr;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -405,7 +484,14 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     }
 
     println!("node {} running on {} with shape {:?}", name, listen, shape);
-    Ok(Node { name: name.to_string(), state, tx, shape, len })
+    Ok(Node {
+        name: name.to_string(),
+        state,
+        tx,
+        shape,
+        len,
+        scratch: RefCell::new(vec![0.0; len]),
+    })
 }
 
 // ---------- module init ----------------------------------------------------
