@@ -11,6 +11,7 @@ use std::{
     os::raw::{c_int, c_void},
     sync::Arc,
 };
+use std::slice;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -69,7 +70,10 @@ struct Node {
 }
 
 enum NodeMode {
-    Server { clients: Arc<tokio::sync::Mutex<Vec<TcpStream>>> },
+    Server {
+        clients: Arc<tokio::sync::Mutex<Vec<TcpStream>>>,
+        last_data: Arc<tokio::sync::Mutex<Vec<u8>>>,
+    },
     Client { addr: SocketAddr, on_update: Option<Py<PyAny>> },
 }
 
@@ -173,16 +177,30 @@ pub fn start(
                 .map_err(|e| PyRuntimeError::new_err(format!("to-tokio: {e}")))?
         };
         let clients = Arc::new(Mutex::new(Vec::new()));
+        let last_data = Arc::new(Mutex::new(Vec::new()));
         let clients2 = clients.clone();
+        let shared2 = shared.clone();
+        let last_data2 = last_data.clone();
         RT.spawn(async move {
             loop {
-                if let Ok((sock, _)) = tokio_listener.accept().await {
-                    clients2.lock().await.push(sock);
+                if let Ok((mut sock, _)) = tokio_listener.accept().await {
+                    let bytes: &[u8] = unsafe { slice::from_raw_parts(shared2.0.mm.as_ptr(), shared2.0.mm.len()) };
+                    let mut ok = true;
+                    if sock.write_all(bytes).await.is_err() { ok = false; }
+                    if ok {
+                        let data = last_data2.lock().await;
+                        let len = data.len() as u32;
+                        if sock.write_all(&len.to_le_bytes()).await.is_err() { ok = false; }
+                        if ok && sock.write_all(&data).await.is_err() { ok = false; }
+                    }
+                    if ok {
+                        clients2.lock().await.push(sock);
+                    }
                 }
             }
         });
         println!("raftmem: server running on {}", addr);
-        Ok(Node { shared, mode: NodeMode::Server { clients } })
+        Ok(Node { shared, mode: NodeMode::Server { clients, last_data } })
     } else if let Some(addr_str) = server {
         let addr: SocketAddr = addr_str
             .parse::<SocketAddr>()
@@ -267,7 +285,12 @@ async fn broadcast_raw(clients: Arc<Mutex<Vec<TcpStream>>>, shared: Shared, data
 
 // ---------- helper -----------------------------------------------------
 fn flush_now(node: &Node, data: Vec<u8>) {
-    if let NodeMode::Server { clients } = &node.mode {
+    if let NodeMode::Server { clients, last_data } = &node.mode {
+        {
+            let _g = RT.enter();
+            let mut ld = RT.block_on(last_data.lock());
+            *ld = data.clone();
+        }
         let clients = clients.clone();
         let shared = node.shared.clone();
         RT.spawn(async move { broadcast_raw(clients, shared, data).await; });
@@ -315,6 +338,31 @@ impl WriteGuard {
         });
     }
 
+    fn __getitem__(&self, idx: usize) -> f64 {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            unsafe {
+                let base = cell.shared.0.mm.as_ptr() as *mut f64;
+                *base.add(idx)
+            }
+        })
+    }
+
+    fn __len__(&self) -> usize {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            // return shape[0]
+            cell.shared.0.shape[0]
+        })
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            cell.shared.0.shape.clone()
+        })
+    }
+
     fn update(&mut self, obj: PyObject) {
         self.data = Some(obj);
     }
@@ -348,6 +396,30 @@ impl ReadGuard {
             );
             PyArray1::from_owned_ptr(py, arr_ptr)
         }
+    }
+
+    fn __getitem__(&self, idx: usize) -> f64 {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            unsafe {
+                let base = cell.shared.0.mm.as_ptr() as *mut f64;
+                *base.add(idx)
+            }
+        })
+    }
+
+    fn __len__(&self) -> usize {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            cell.shared.0.len()
+        })
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        Python::with_gil(|py| {
+            let cell = self.node.as_ref(py).borrow();
+            cell.shared.0.shape.clone()
+        })
     }
 
     fn __exit__(&mut self, _t: &PyAny, _v: &PyAny, _tb: &PyAny) -> PyResult<()> {
