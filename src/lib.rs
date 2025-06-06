@@ -81,9 +81,22 @@ enum NodeMode {
 impl Node {
     /// Return a numpy.ndarray\<f64\> view of our shared buffer.
     #[getter]
-    fn ndarray<'py>(slf: PyRef<'py, Node>, py: Python<'py>) -> &'py PyArray1<f64> {
-        let dims: [npy_intp; 1] = [slf.shared.0.len() as npy_intp];
-        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+    fn ndarray<'py>(slf: PyRef<'py, Node>, py: Python<'py>) -> PyResult<&'py PyAny> {
+        let shape: Vec<npy_intp> = slf
+            .shared
+            .0
+            .shape()
+            .iter()
+            .map(|&d| d as npy_intp)
+            .collect();
+
+        let mut strides: Vec<npy_intp> = vec![0; shape.len()];
+        if !shape.is_empty() {
+            strides[shape.len() - 1] = std::mem::size_of::<f64>() as npy_intp;
+            for i in (0..shape.len() - 1).rev() {
+                strides[i] = strides[i + 1] * shape[i + 1];
+            }
+        }
 
         unsafe {
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
@@ -92,14 +105,14 @@ impl Node {
                 py,
                 subtype,
                 descr,
-                dims.len() as c_int,
-                dims.as_ptr() as *mut npy_intp,
+                shape.len() as c_int,
+                shape.as_ptr() as *mut npy_intp,
                 strides.as_ptr() as *mut npy_intp,
                 slf.shared.0.ptr(),
                 NPY_ARRAY_WRITEABLE,
                 slf.as_ptr(),
             );
-            PyArray1::from_owned_ptr(py, arr_ptr)
+            Ok(py.from_owned_ptr(arr_ptr))
         }
     }
 
