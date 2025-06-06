@@ -1,8 +1,10 @@
 mod memory;
 mod net;
+mod delta;
 
 use memory::{MmapBuf, Shared};
 use net::{client, serve, Update};
+use delta::compute_deltas;
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -22,7 +24,7 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 struct Node {
     name: String,
     state: Shared,
-    tx: async_channel::Sender<Update>,
+    tx: async_channel::Sender<Vec<Update>>,
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
@@ -53,33 +55,28 @@ impl Node {
     }
 
     fn flush(&self, _idx: usize) {
+        // take a snapshot of the current shared memory
+        let mut curr = vec![0.0; self.len];
+        self.state.read_snapshot(&mut curr);
+
         let mut scratch = self.scratch.borrow_mut();
         if scratch.len() != self.len {
             scratch.resize(self.len, 0.0);
         }
-        let mut start: Option<usize> = None;
-        let mut end = 0usize;
-        for i in 0..self.len {
-            let v = self.state.get(i);
-            if scratch[i] != v {
-                if start.is_none() {
-                    start = Some(i);
-                }
-                end = i;
-                scratch[i] = v;
+
+        let updates = compute_deltas(&mut scratch, &curr, &self.shape);
+        if !updates.is_empty() {
+            for u in &updates {
+                let end = u.start as usize + u.vals.len() - 1;
+                println!(
+                    "{} flushing range {}..{} ({} values)",
+                    self.name,
+                    u.start,
+                    end,
+                    u.vals.len()
+                );
             }
-        }
-        if let Some(s) = start {
-            let vals = scratch[s..=end].to_vec();
-            println!(
-                "{} flushing range {}..{} ({} values)",
-                self.name,
-                s,
-                end,
-                vals.len()
-            );
-            let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
-            let _ = self.tx.try_send(Update { shape, start: s as u32, vals });
+            let _ = self.tx.try_send(updates);
         }
     }
 
@@ -195,7 +192,7 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let state = Shared::new(buf);
-    let (tx, rx) = async_channel::bounded(1024);
+    let (tx, rx) = async_channel::bounded::<Vec<Update>>(1024);
 
     if let Some(addr) = listen {
         let listen_addr: SocketAddr = addr.parse()
