@@ -12,14 +12,14 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--listen', default='0.0.0.0:7010')
 args = parser.parse_args()
 
-node = raftmem.start("a", listen=args.listen, shape=[1000])
+node = raftmem.start("a", listen=args.listen, shape=[100])
 
 idx = 0
 while True:
     with node.write() as a:
-        a[idx] = random.random() * 10
+        a[idx] = random.random()
         a.update({"position": idx})
-    idx = (idx + 1) % 1000
+    idx = (idx + 1) % len(a)
     with node.read() as arr:
         print(arr)
     time.sleep(1)                    # write flushes on __exit__
