@@ -24,6 +24,7 @@ memmap2     = "0.9"
 libc        = "0.2"
 openraft = "0.9.18"
 openraft-memstore = "0.9.18"
+lz4_flex = "0.11"
 
 [build-dependencies]
 pyo3-build-config = "0.20"
