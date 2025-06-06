@@ -17,7 +17,6 @@ pyo3        = { version = "0.20", features = ["extension-module", "auto-initiali
 numpy       = "0.20"
 tokio       = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
 anyhow      = "1"
-parking_lot = "0.12"
 once_cell   = "1"
 async-channel = "1"   # used in lib.rs for the broadcast queue
 memmap2     = "0.9"
