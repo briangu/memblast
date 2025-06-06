@@ -70,16 +70,16 @@ impl Node {
             }
         }
         if let Some(s) = start {
-            let vals = scratch[s..=end].to_vec();
+            let len = end - s + 1;
             println!(
                 "{} flushing range {}..{} ({} values)",
                 self.name,
                 s,
                 end,
-                vals.len()
+                len
             );
             let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
-            let _ = self.tx.try_send(Update { shape, start: s as u32, vals });
+            let _ = self.tx.try_send(Update { shape, start: s as u32, len: len as u32 });
         }
     }
 
