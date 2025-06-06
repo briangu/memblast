@@ -74,25 +74,21 @@ impl Shared {
 #[derive(Debug, Clone)]
 struct Update {
     shape: Vec<u32>,
-    dirty: Vec<u8>,
+    start: u32,
     vals: Vec<f64>,
 }
 
 impl Update {
     fn to_bytes(&self) -> Vec<u8> {
         let shape_len = self.shape.len() as u32;
-        let bit_len = self.dirty.len() as u32;
         let val_len = self.vals.len() as u32;
-        let mut buf = Vec::with_capacity(
-            4 + self.shape.len() * 4 + 4 + 4 + self.dirty.len() + self.vals.len() * 8,
-        );
+        let mut buf = Vec::with_capacity(4 + self.shape.len() * 4 + 4 + 4 + self.vals.len() * 8);
         buf.extend_from_slice(&shape_len.to_le_bytes());
         for d in &self.shape {
             buf.extend_from_slice(&d.to_le_bytes());
         }
-        buf.extend_from_slice(&bit_len.to_le_bytes());
+        buf.extend_from_slice(&self.start.to_le_bytes());
         buf.extend_from_slice(&val_len.to_le_bytes());
-        buf.extend_from_slice(&self.dirty);
         for v in &self.vals {
             buf.extend_from_slice(&v.to_le_bytes());
         }
@@ -104,7 +100,7 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
     let local_shape = state.shape().to_vec();
-    let local_bytes = state.mm.byte_len();
+    let _local_bytes = state.mm.byte_len();
 
     loop {
         // read the remote array shape
@@ -134,15 +130,15 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
 
         let len: usize = shape.iter().product();
 
-        // read bitmask and value lengths
-        let mut bit_len_buf = [0u8; 4];
-        match sock.read_exact(&mut bit_len_buf).await {
+        // read start index and value length
+        let mut start_buf = [0u8; 4];
+        match sock.read_exact(&mut start_buf).await {
             Ok(_) => {}
             Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
             Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e.into()),
         }
-        let bit_len = u32::from_le_bytes(bit_len_buf) as usize;
+        let start_idx = u32::from_le_bytes(start_buf) as usize;
 
         let mut val_len_buf = [0u8; 4];
         match sock.read_exact(&mut val_len_buf).await {
@@ -156,7 +152,7 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
         if shape != local_shape {
             println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
             // discard incoming data
-            let mut discard = vec![0u8; bit_len + val_len * 8];
+            let mut discard = vec![0u8; val_len * 8];
             match sock.read_exact(&mut discard).await {
                 Ok(_) => continue,
                 Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
@@ -164,14 +160,6 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
                 Err(e) => return Err(e.into()),
             }
         } else {
-            let mut mask = vec![0u8; bit_len];
-            match sock.read_exact(&mut mask).await {
-                Ok(_) => {}
-                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-                Err(e) => return Err(e.into()),
-            }
-
             let mut vals_buf = vec![0u8; val_len * 8];
             match sock.read_exact(&mut vals_buf).await {
                 Ok(_) => {}
@@ -192,12 +180,9 @@ async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
             unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len_bytes, PROT_READ | PROT_WRITE); }
 
             let base = state.mm.mm.as_ptr() as *mut f64;
-            let mut val_iter = vals.into_iter();
-            for i in 0..len {
-                if i / 8 < mask.len() && (mask[i / 8] >> (i % 8)) & 1 == 1 {
-                    if let Some(v) = val_iter.next() {
-                        unsafe { *base.add(i) = v; }
-                    }
+            for (i, v) in (start_idx..start_idx + val_len).zip(vals.into_iter()) {
+                if i < len {
+                    unsafe { *base.add(i) = v; }
                 }
             }
 
@@ -222,7 +207,12 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
         }
     }
     while let Some(u) = rx.recv().await.ok() {
-        println!("broadcasting update shape {:?} dirty {} bytes", u.shape, u.dirty.len());
+        println!(
+            "broadcasting update shape {:?} start {} len {}",
+            u.shape,
+            u.start,
+            u.vals.len()
+        );
         let data = u.to_bytes();
 
         for p in &peers {
@@ -306,25 +296,31 @@ impl Node {
             scratch.resize(self.len, 0.0);
         }
 
-        let mut dirty = vec![0u8; (self.len + 7) / 8];
-        let mut vals = Vec::new();
-
+        let mut start: Option<usize> = None;
+        let mut end = 0usize;
         for i in 0..self.len {
             let v = self.state.get(i);
             if scratch[i] != v {
-                dirty[i / 8] |= 1 << (i % 8);
-                vals.push(v);
+                if start.is_none() {
+                    start = Some(i);
+                }
+                end = i;
                 scratch[i] = v;
             }
         }
 
-        if vals.is_empty() {
-            return;
+        if let Some(s) = start {
+            let vals = scratch[s..=end].to_vec();
+            println!(
+                "{} flushing range {}..{} ({} values)",
+                self.name,
+                s,
+                end,
+                vals.len()
+            );
+            let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
+            let _ = self.tx.try_send(Update { shape, start: s as u32, vals });
         }
-
-        println!("{} flushing {} values", self.name, vals.len());
-        let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
-        let _ = self.tx.try_send(Update { shape, dirty, vals });
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
