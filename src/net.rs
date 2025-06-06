@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{self, Duration};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 
@@ -30,6 +31,14 @@ impl Update {
         }
         buf
     }
+}
+
+fn snapshot_update(state: &Shared) -> Update {
+    let shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
+    let len: usize = state.shape().iter().product();
+    let mut buf = vec![0.0; len];
+    state.read_snapshot(&mut buf);
+    Update { shape, start: 0, vals: buf }
 }
 
 async fn read_exact_checked(sock: &mut TcpStream, buf: &mut [u8]) -> Result<bool> {
@@ -131,65 +140,52 @@ pub async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
     Ok(())
 }
 
-pub async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>) -> Result<()> {
-    let mut conns: Vec<(SocketAddr, TcpStream)> = Vec::new();
-    for p in &peers {
-        println!("connecting to peer {}", p);
-        match TcpStream::connect(*p).await {
-            Ok(s) => {
-                println!("connected to {}", p);
-                conns.push((*p, s));
+pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Update>, state: Shared) -> Result<()> {
+    println!("listening on {}", addr);
+    let lst = TcpListener::bind(addr).await?;
+    let mut conns: Vec<TcpStream> = Vec::new();
+    loop {
+        tokio::select! {
+            res = lst.accept() => {
+                let (mut sock, peer) = res?;
+                println!("accepted connection from {}", peer);
+                let snap = snapshot_update(&state);
+                if sock.write_all(&snap.to_bytes()).await.is_ok() {
+                    conns.push(sock);
+                }
             }
-            Err(e) => println!("failed to connect to {}: {}", p, e),
-        }
-    }
-    while let Some(u) = rx.recv().await.ok() {
-        println!(
-            "broadcasting update shape {:?} start {} len {}",
-            u.shape,
-            u.start,
-            u.vals.len()
-        );
-        let data = u.to_bytes();
-
-        for p in &peers {
-            if !conns.iter().any(|(addr, _)| addr == p) {
-                println!("reconnecting to {}", p);
-                match TcpStream::connect(*p).await {
-                    Ok(s) => {
-                        println!("connected to {}", p);
-                        conns.push((*p, s));
+            res = rx.recv() => {
+                let u = match res { Ok(v) => v, Err(_) => break };
+                let data = u.to_bytes();
+                let mut alive = Vec::new();
+                for mut s in conns {
+                    match s.write_all(&data).await {
+                        Ok(_) => alive.push(s),
+                        Err(e) => println!("send failed: {}", e),
                     }
-                    Err(e) => println!("connect failed to {}: {}", p, e),
                 }
+                conns = alive;
             }
         }
-
-        let mut alive = Vec::new();
-        for (addr, mut s) in conns {
-            match s.write_all(&data).await {
-                Ok(_) => {
-                    println!("sent to {}", addr);
-                    alive.push((addr, s));
-                }
-                Err(e) => {
-                    println!("send failed to {}: {}", addr, e);
-                }
-            }
-        }
-        conns = alive;
     }
     Ok(())
 }
 
-pub async fn listener(addr: SocketAddr, state: Shared) -> Result<()> {
-    println!("listening on {}", addr);
-    let lst = TcpListener::bind(addr).await?;
+pub async fn client(server: SocketAddr, state: Shared) -> Result<()> {
+    let mut interval = time::interval(Duration::from_secs(1));
     loop {
-        let (sock, peer) = lst.accept().await?;
-        println!("accepted connection from {}", peer);
-        let st = state.clone();
-        tokio::spawn(async move { let _ = handle_peer(sock, st).await; });
+        println!("connecting to server {}", server);
+        match TcpStream::connect(server).await {
+            Ok(sock) => {
+                println!("connected to {}", server);
+                let res = handle_peer(sock, state.clone()).await;
+                if let Err(e) = res {
+                    println!("connection error {}: {}", server, e);
+                }
+            }
+            Err(e) => println!("failed to connect to {}: {}", server, e),
+        }
+        interval.tick().await;
     }
 }
 
