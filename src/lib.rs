@@ -16,6 +16,8 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::os::raw::{c_int, c_void};
 
+pub mod ring;
+
 // ---------- global Tokio runtime (one per process) -------------------------
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 
@@ -70,103 +72,86 @@ impl Shared {
 }
 
 // ---------- wire protocol ---------------------------------------------------
-#[derive(Debug, Clone)]
-struct Update {
-    shape: Vec<u32>,
-    arr: Vec<f64>,
-}
-
-impl Update {
-    fn to_bytes(&self) -> Vec<u8> {
-        let shape_len = self.shape.len() as u32;
-        let mut buf = Vec::with_capacity(4 + self.shape.len() * 4 + self.arr.len() * 8);
-        buf.extend_from_slice(&shape_len.to_le_bytes());
-        for d in &self.shape {
-            buf.extend_from_slice(&d.to_le_bytes());
-        }
-        for v in &self.arr {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        buf
-    }
-}
 
 async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
-    let local_shape = state.shape().to_vec();
     let local_bytes = state.mm.byte_len();
 
     loop {
-        // read the remote array shape
-        let mut shape_len_buf = [0u8; 4];
-        match sock.read_exact(&mut shape_len_buf).await {
-            Ok(_) => {}
-            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-            Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-            Err(e) => return Err(e.into()),
-        }
-        let shape_len = u32::from_le_bytes(shape_len_buf) as usize;
-
-        let mut shape_bytes = vec![0u8; shape_len * 4];
-        match sock.read_exact(&mut shape_bytes).await {
+        let mut hdr = [0u8; 16];
+        match sock.read_exact(&mut hdr).await {
             Ok(_) => {}
             Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
             Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e.into()),
         }
 
-        let mut shape = Vec::with_capacity(shape_len);
-        for i in 0..shape_len {
-            let mut d = [0u8; 4];
-            d.copy_from_slice(&shape_bytes[i * 4..(i + 1) * 4]);
-            shape.push(u32::from_le_bytes(d) as usize);
+        let len = u32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
+        let kind = hdr[12];
+        let mut payload = vec![0u8; len];
+        match sock.read_exact(&mut payload).await {
+            Ok(_) => {}
+            Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
+            Err(e) => return Err(e.into()),
         }
 
-        let len: usize = shape.iter().product();
-        let byte_len = len * 8;
-
-        if shape != local_shape {
-            println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
-            // consume incoming data but discard it
-            let mut discard = vec![0u8; byte_len];
-            match sock.read_exact(&mut discard).await {
-                Ok(_) => continue,
-                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-                Err(e) => return Err(e.into()),
+        match kind {
+            1 => {
+                if len != local_bytes {
+                    println!("size mismatch: recv {} local {}", len, local_bytes);
+                    continue;
+                }
+                let len0 = state.mm.byte_len();
+                {
+                    let _guard = state.lock.write();
+                    unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len0, PROT_READ | PROT_WRITE); }
+                }
+                let dst: &mut [u8] = unsafe {
+                    std::slice::from_raw_parts_mut(state.mm.mm.as_ptr() as *mut u8, local_bytes)
+                };
+                dst.copy_from_slice(&payload);
+                {
+                    let _guard = state.lock.write();
+                    unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len0, PROT_READ); }
+                }
             }
-        } else {
-            // prepare memory for writing under the lock
-            let len = state.mm.byte_len();
-            {
-                let _guard = state.lock.write();
-                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ | PROT_WRITE); }
+            0 => {
+                if len < 8 {
+                    println!("delta message too short: {} bytes", len);
+                    continue;
+                }
+                let mut off_buf = [0u8; 8];
+                off_buf.copy_from_slice(&payload[..8]);
+                let off = u64::from_le_bytes(off_buf) as usize;
+                let data = &payload[8..];
+                if off + data.len() > local_bytes {
+                    println!("delta out of bounds: off {} len {}", off, data.len());
+                    continue;
+                }
+                let len0 = state.mm.byte_len();
+                {
+                    let _guard = state.lock.write();
+                    unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len0, PROT_READ | PROT_WRITE); }
+                }
+                unsafe {
+                    let dst = state.mm.mm.as_ptr().add(off) as *mut u8;
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+                }
+                {
+                    let _guard = state.lock.write();
+                    unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len0, PROT_READ); }
+                }
             }
-
-            let dst: &mut [u8] = unsafe {
-                std::slice::from_raw_parts_mut(state.mm.mm.as_ptr() as *mut u8, local_bytes)
-            };
-
-            match sock.read_exact(dst).await {
-                Ok(_) => {}
-                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
-                Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
-                Err(e) => return Err(e.into()),
-            }
-
-            // restore protection under the lock
-            {
-                let _guard = state.lock.write();
-                unsafe { mprotect(state.mm.mm.as_ptr() as *mut _, len, PROT_READ); }
-            }
+            _ => {}
         }
     }
     println!("peer {:?} disconnected", addr);
     Ok(())
 }
 
-async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>) -> Result<()> {
+async fn broadcaster(peers: Vec<SocketAddr>, ring: Arc<ring::Ring>, rx: async_channel::Receiver<()>) -> Result<()> {
     let mut conns: Vec<(SocketAddr, TcpStream)> = Vec::new();
     for p in &peers {
         println!("connecting to peer {}", p);
@@ -178,36 +163,42 @@ async fn broadcaster(peers: Vec<SocketAddr>, rx: async_channel::Receiver<Update>
             Err(e) => println!("failed to connect to {}: {}", p, e),
         }
     }
-    while let Some(u) = rx.recv().await.ok() {
-        println!("broadcasting full array shape {:?}", u.shape);
-        let data = u.to_bytes();
+    let mut cursor = ring.cursor();
+    while rx.recv().await.is_ok() {
+        while let Some(delta) = cursor.next() {
+            let mut buf = Vec::with_capacity(16 + delta.payload.len());
+            buf.extend_from_slice(&delta.seq.to_le_bytes());
+            buf.extend_from_slice(&(delta.payload.len() as u32).to_le_bytes());
+            buf.push(delta.kind);
+            buf.extend_from_slice(&[0u8;3]);
+            buf.extend_from_slice(delta.payload);
 
-        for p in &peers {
-            if !conns.iter().any(|(addr, _)| addr == p) {
-                println!("reconnecting to {}", p);
-                match TcpStream::connect(*p).await {
-                    Ok(s) => {
-                        println!("connected to {}", p);
-                        conns.push((*p, s));
+            for p in &peers {
+                if !conns.iter().any(|(addr, _)| addr == p) {
+                    println!("reconnecting to {}", p);
+                    match TcpStream::connect(*p).await {
+                        Ok(s) => {
+                            println!("connected to {}", p);
+                            conns.push((*p, s));
+                        }
+                        Err(e) => println!("connect failed to {}: {}", p, e),
                     }
-                    Err(e) => println!("connect failed to {}: {}", p, e),
                 }
             }
-        }
 
-        let mut alive = Vec::new();
-        for (addr, mut s) in conns {
-            match s.write_all(&data).await {
-                Ok(_) => {
-                    println!("sent to {}", addr);
-                    alive.push((addr, s));
-                }
-                Err(e) => {
-                    println!("send failed to {}: {}", addr, e);
+            let mut alive = Vec::new();
+            for (addr, mut s) in conns {
+                match s.write_all(&buf).await {
+                    Ok(_) => {
+                        alive.push((addr, s));
+                    }
+                    Err(e) => {
+                        println!("send failed to {}: {}", addr, e);
+                    }
                 }
             }
+            conns = alive;
         }
-        conns = alive;
     }
     Ok(())
 }
@@ -228,7 +219,8 @@ async fn listener(addr: SocketAddr, state: Shared) -> Result<()> {
 struct Node {
     name: String,
     state: Shared,
-    tx: async_channel::Sender<Update>,
+    ring: Arc<ring::Ring>,
+    tx: async_channel::Sender<()>,
     shape: Vec<usize>,
     len: usize,
 }
@@ -257,13 +249,11 @@ impl Node {
         }
     }
     fn flush(&self, _idx: usize) {
-        let mut arr = Vec::with_capacity(self.len);
-        for i in 0..self.len {
-            arr.push(self.state.get(i));
+        let bytes = unsafe { std::slice::from_raw_parts(self.state.mm.mm.as_ptr(), self.state.mm.byte_len()) };
+        println!("{} pushing checkpoint", self.name);
+        if self.ring.push(1, bytes).is_ok() {
+            let _ = self.tx.try_send(());
         }
-        println!("{} flushing full array", self.name);
-        let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
-        let _ = self.tx.try_send(Update { shape, arr });
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
@@ -402,6 +392,14 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let state = Shared::new(buf);
     let (tx, rx) = async_channel::bounded(1024);
+    let ring_path = std::env::temp_dir().join(format!("{}-ring", name));
+    let ring = Arc::new(ring::Ring::new(&ring_path).map_err(|e| PyValueError::new_err(e.to_string()))?);
+    {
+        let bytes = unsafe { std::slice::from_raw_parts(state.mm.mm.as_ptr(), state.mm.byte_len()) };
+        ring.push(1, bytes).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        // trigger initial broadcast of the checkpoint
+        let _ = tx.try_send(());
+    }
 
     let listen_addr: SocketAddr = listen.parse()
         .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
@@ -410,7 +408,8 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
 
     let st_clone = state.clone();
     RUNTIME.spawn(listener(listen_addr, st_clone));
-    RUNTIME.spawn(broadcaster(peer_addrs, rx));
+    let ring_clone = ring.clone();
+    RUNTIME.spawn(broadcaster(peer_addrs, ring_clone, rx));
 
     unsafe {
         let len0 = state.mm.byte_len();
@@ -421,7 +420,7 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     }
 
     println!("node {} running on {} with shape {:?}", name, listen, shape);
-    Ok(Node { name: name.to_string(), state, tx, shape, len })
+    Ok(Node { name: name.to_string(), state, ring, tx, shape, len })
 }
 
 // ---------- module init ----------------------------------------------------
