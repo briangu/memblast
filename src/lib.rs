@@ -16,13 +16,6 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::os::raw::{c_int, c_void};
 
-use openraft::{Config, Raft, AnyError};
-use openraft::error::{RPCError, RaftError, Unreachable, InstallSnapshotError};
-use openraft::network::{RaftNetwork, RaftNetworkFactory, RPCOption};
-use openraft::storage::Adaptor;
-use openraft_memstore::MemStore;
-
-
 // ---------- global Tokio runtime (one per process) -------------------------
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 
@@ -30,7 +23,6 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 struct MmapBuf {
     mm: MmapMut,
     shape: Vec<usize>,
-    len: usize,
 }
 
 impl MmapBuf {
@@ -38,7 +30,7 @@ impl MmapBuf {
         let len: usize = shape.iter().product();
         let layout = len * std::mem::size_of::<f64>();
         let mm = MmapOptions::new().len(layout).map_anon()?;
-        Ok(Self { mm, shape, len })
+        Ok(Self { mm, shape })
     }
 
     fn ptr(&self) -> *mut c_void {
@@ -47,10 +39,6 @@ impl MmapBuf {
 
     fn byte_len(&self) -> usize {
         self.mm.len()
-    }
-
-    fn elems(&self) -> usize {
-        self.len
     }
 
     fn shape(&self) -> &[usize] {
@@ -69,24 +57,11 @@ impl Shared {
         Self { mm: Arc::new(mm), lock: Arc::new(RwLock::new(())) }
     }
 
-    fn apply(&self, idx: usize, val: f64) {
-        if idx < self.mm.elems() {
-            unsafe {
-                let base = self.mm.mm.as_ptr() as *mut f64;
-                *base.add(idx) = val;
-            }
-        }
-    }
-
     fn get(&self, idx: usize) -> f64 {
         unsafe {
             let base = self.mm.mm.as_ptr() as *const f64;
             *base.add(idx)
         }
-    }
-
-    fn elems(&self) -> usize {
-        self.mm.elems()
     }
 
     fn shape(&self) -> &[usize] {
@@ -113,48 +88,6 @@ impl Update {
             buf.extend_from_slice(&v.to_le_bytes());
         }
         buf
-    }
-}
-
-// ---------- raft network ----------------------------------------------------
-
-#[derive(Clone, Default)]
-struct DummyNetwork;
-
-impl RaftNetwork<openraft_memstore::TypeConfig> for DummyNetwork {
-    async fn append_entries(
-        &mut self,
-        _rpc: openraft::raft::AppendEntriesRequest<openraft_memstore::TypeConfig>,
-        _option: RPCOption,
-    ) -> Result<openraft::raft::AppendEntriesResponse<u64>, RPCError<u64, (), RaftError<u64>>> {
-        Err(RPCError::Unreachable(Unreachable::new(&AnyError::error("no network"))))
-    }
-
-    async fn install_snapshot(
-        &mut self,
-        _rpc: openraft::raft::InstallSnapshotRequest<openraft_memstore::TypeConfig>,
-        _option: RPCOption,
-    ) -> Result<openraft::raft::InstallSnapshotResponse<u64>, RPCError<u64, (), RaftError<u64, InstallSnapshotError>>> {
-        Err(RPCError::Unreachable(Unreachable::new(&AnyError::error("no network"))))
-    }
-
-    async fn vote(
-        &mut self,
-        _rpc: openraft::raft::VoteRequest<u64>,
-        _option: RPCOption,
-    ) -> Result<openraft::raft::VoteResponse<u64>, RPCError<u64, (), RaftError<u64>>> {
-        Err(RPCError::Unreachable(Unreachable::new(&AnyError::error("no network"))))
-    }
-}
-
-#[derive(Clone, Default)]
-struct DummyFactory;
-
-impl RaftNetworkFactory<openraft_memstore::TypeConfig> for DummyFactory {
-    type Network = DummyNetwork;
-
-    async fn new_client(&mut self, _target: u64, _node: &()) -> Self::Network {
-        DummyNetwork
     }
 }
 
@@ -298,7 +231,6 @@ struct Node {
     tx: async_channel::Sender<Update>,
     shape: Vec<usize>,
     len: usize,
-    raft: Raft<openraft_memstore::TypeConfig>,
 }
 
 #[pymethods]
@@ -475,27 +407,6 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
         .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
     let peer_addrs: Vec<SocketAddr> = peers.iter().filter_map(|p| p.parse().ok()).collect();
 
-    // setup raft
-    let node_id = listen_addr.port() as u64;
-    let mut members = std::collections::BTreeSet::new();
-    members.insert(node_id);
-    for p in &peer_addrs {
-        members.insert(p.port() as u64);
-    }
-
-    let raft = RUNTIME.block_on(async {
-        let cfg = Arc::new(Config::default().validate().unwrap());
-        let store = Arc::new(MemStore::new());
-        let (log_store, sm_store) = Adaptor::<openraft_memstore::TypeConfig, _>::new(store);
-        let network = DummyFactory::default();
-        let r = Raft::new(node_id, cfg.clone(), network, log_store, sm_store)
-            .await
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        if let Err(e) = r.initialize(members).await {
-            eprintln!("raft init error: {}", e);
-        }
-        Ok::<_, PyErr>(r)
-    })?;
 
     let st_clone = state.clone();
     RUNTIME.spawn(listener(listen_addr, st_clone));
@@ -510,7 +421,7 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     }
 
     println!("node {} running on {} with shape {:?}", name, listen, shape);
-    Ok(Node { name: name.to_string(), state, tx, shape, len, raft })
+    Ok(Node { name: name.to_string(), state, tx, shape, len })
 }
 
 // ---------- module init ----------------------------------------------------
