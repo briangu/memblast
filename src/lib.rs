@@ -25,6 +25,7 @@ use openraft_memstore::MemStore;
 
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use serde_json;
+use std::error::Error;
 
 
 // ---------- global Tokio runtime (one per process) -------------------------
@@ -122,7 +123,7 @@ impl Update {
 
 // ---------- raft network ----------------------------------------------------
 
-#[derive(Clone)]
+// #[derive(Clone)]
 struct DummyNetwork {
     addr: SocketAddr,
 }
@@ -145,14 +146,13 @@ impl DummyNetwork {
         sock.write_all(&len).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
         sock.write_all(&data).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
 
-        let mut len_buf = [0u8; 4];
-        sock.read_exact(&mut len_buf).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
-        let resp_len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; resp_len];
-        sock.read_exact(&mut buf).await.map_err(|e| RPCError::Unreachable(Unreachable::new(&AnyError::new(&e))))?;
-        let resp = serde_json::from_slice(&buf)
-            .map_err(|e| RPCError::Network(openraft::error::NetworkError::new(&e)))?;
-        Ok(resp)
+        let resp: Result<T> = read_json(&mut sock).await;
+        match resp {
+            Ok(resp) => Ok(resp),
+            Err(e)  => {
+                Err(RaftError::Network(openraft::error::NetworkError::new(&e)))
+            }
+        }
     }
 }
 
@@ -203,20 +203,61 @@ impl RaftNetworkFactory<openraft_memstore::TypeConfig> for DummyFactory {
 }
 
 async fn write_json<T: Serialize>(sock: &mut TcpStream, v: &T) -> Result<()> {
-    let data = serde_json::to_vec(v)?;
+    // Serialize to JSON
+    let data = match serde_json::to_vec(v) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("Failed to serialize to JSON: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    // Write length prefix
     let len = (data.len() as u32).to_le_bytes();
-    sock.write_all(&len).await?;
-    sock.write_all(&data).await?;
+    if let Err(e) = sock.write_all(&len).await {
+        eprintln!("Failed to write length prefix: {}", e);
+        return Err(e.into());
+    }
+
+    // Write JSON data
+    if let Err(e) = sock.write_all(&data).await {
+        eprintln!("Failed to write JSON data ({} bytes): {}", data.len(), e);
+        return Err(e.into());
+    }
+
+    if let Err(e) = sock.flush().await {
+        eprintln!("Failed to flush socket: {}", e);
+        return Err(e.into());
+    }
+
     Ok(())
 }
 
 async fn read_json<T: DeserializeOwned>(sock: &mut TcpStream) -> Result<T> {
+    // Read length prefix
     let mut len_buf = [0u8; 4];
-    sock.read_exact(&mut len_buf).await?;
+    if let Err(e) = sock.read_exact(&mut len_buf).await {
+        eprintln!("Failed to read length prefix: {}", e);
+        return Err(e.into());
+    }
     let len = u32::from_le_bytes(len_buf) as usize;
+
+    // Read JSON data
     let mut buf = vec![0u8; len];
-    sock.read_exact(&mut buf).await?;
-    Ok(serde_json::from_slice(&buf)?)
+    if let Err(e) = sock.read_exact(&mut buf).await {
+        eprintln!("Failed to read JSON data (expected {} bytes): {}", len, e);
+        return Err(e.into());
+    }
+
+    // Parse JSON
+    match serde_json::from_slice::<T>(&buf) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            let json_str = String::from_utf8_lossy(&buf);
+            eprintln!("Failed to parse JSON: {}\nRaw JSON: {}", e, json_str);
+            Err(e.into())
+        }
+    }
 }
 
 async fn handle_peer(mut sock: TcpStream, state: Shared, raft: Raft<openraft_memstore::TypeConfig>) -> Result<()> {
@@ -233,6 +274,7 @@ async fn handle_peer(mut sock: TcpStream, state: Shared, raft: Raft<openraft_mem
             Err(ref e) if e.kind() == ErrorKind::ConnectionReset => break,
             Err(e) => return Err(e.into()),
         }
+        println!("peer {:?} received message type {}", addr, t[0]);
 
         match t[0] {
             0 => {
@@ -301,21 +343,27 @@ async fn handle_peer(mut sock: TcpStream, state: Shared, raft: Raft<openraft_mem
                 }
             }
             1 => {
+                println!("peer {:?} received AppendEntriesRequest", addr);
                 let req: openraft::raft::AppendEntriesRequest<openraft_memstore::TypeConfig> = read_json(&mut sock).await?;
                 let resp = raft.append_entries(req).await;
                 write_json(&mut sock, &resp).await?;
+                println!("peer {:?} sent AppendEntriesResponse", addr);
             }
             2 => {
+                println!("peer {:?} received InstallSnapshotRequest", addr);
                 let req: openraft::raft::InstallSnapshotRequest<openraft_memstore::TypeConfig> = read_json(&mut sock).await?;
                 let resp = raft.install_snapshot(req).await;
                 write_json(&mut sock, &resp).await?;
+                println!("peer {:?} sent InstallSnapshotResponse", addr);
             }
             3 => {
+                println!("peer {:?} received VoteRequest", addr);
                 let req: openraft::raft::VoteRequest<u64> = read_json(&mut sock).await?;
                 let resp = raft.vote(req).await;
                 write_json(&mut sock, &resp).await?;
+                println!("peer {:?} sent VoteResponse {:?}", addr, resp);
             }
-            _ => break,
+            _ => continue,
         }
     }
     println!("peer {:?} disconnected", addr);
@@ -394,6 +442,7 @@ struct Node {
     raft: Raft<openraft_memstore::TypeConfig>,
     peers: HashMap<u64, SocketAddr>,
     listen: SocketAddr,
+    on_leader: Option<PyObject>,
 }
 
 #[pymethods]
@@ -454,6 +503,23 @@ impl Node {
         }
         let guard: RwLockReadGuard<'static, ()> = unsafe { std::mem::transmute::<RwLockReadGuard<'_, ()>, RwLockReadGuard<'static, ()>>(guard) };
         Ok(ReadGuard { node: slf.into(), guard: Some(guard) })
+    }
+
+    fn set_on_leader(&mut self, cb: PyObject) {
+        self.on_leader = Some(cb.clone());
+        let raft = self.raft.clone();
+        RUNTIME.spawn(async move {
+            let mut metrics = raft.metrics();
+            while metrics.changed().await.is_ok() {
+                let m = metrics.borrow().clone();
+                println!("{} {}", m.id, m);
+                if m.current_leader == Some(m.id) {
+                    Python::with_gil(|py| {
+                        let _ = cb.call0(py);
+                    });
+                }
+            }
+        });
     }
 }
 
@@ -611,7 +677,7 @@ fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Opt
     }
 
     println!("node {} running on {} with shape {:?}", name, listen, shape);
-    Ok(Node { name: name.to_string(), state, tx, shape, len, raft, peers: peer_map, listen: listen_addr })
+    Ok(Node { name: name.to_string(), state, tx, shape, len, raft, peers: peer_map, listen: listen_addr, on_leader: None })
 }
 
 // ---------- module init ----------------------------------------------------
