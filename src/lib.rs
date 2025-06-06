@@ -2,7 +2,7 @@ mod memory;
 mod net;
 
 use memory::{MmapBuf, Shared};
-use net::{broadcaster, listener, Update};
+use net::{client, serve, Update};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -189,25 +189,32 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen, peers, shape=None))]
-fn start(_py: Python<'_>, name: &str, listen: &str, peers: Vec<&str>, shape: Option<Vec<usize>>) -> PyResult<Node> {
+#[pyo3(signature = (name, listen=None, server=None, shape=None))]
+fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>, shape: Option<Vec<usize>>) -> PyResult<Node> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let state = Shared::new(buf);
     let (tx, rx) = async_channel::bounded(1024);
 
-    let listen_addr: SocketAddr = listen.parse()
-        .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
-    let peer_addrs: Vec<SocketAddr> = peers.iter().filter_map(|p| p.parse().ok()).collect();
+    if let Some(addr) = listen {
+        let listen_addr: SocketAddr = addr.parse()
+            .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
+        let st_clone = state.clone();
+        let rx_clone = rx.clone();
+        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone));
+    }
 
-    let st_clone = state.clone();
-    RUNTIME.spawn(listener(listen_addr, st_clone));
-    RUNTIME.spawn(broadcaster(peer_addrs, rx));
+    if let Some(addr) = server {
+        let server_addr: SocketAddr = addr.parse()
+            .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
+        let st_clone = state.clone();
+        RUNTIME.spawn(client(server_addr, st_clone));
+    }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-    println!("node {} running on {} with shape {:?}", name, listen, shape);
+    println!("node {} running with listen={:?} server={:?} shape {:?}", name, listen, server, shape);
     Ok(Node {
         name: name.to_string(),
         state,
