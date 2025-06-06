@@ -384,7 +384,6 @@ dependencies = [
  "memmap2",
  "numpy",
  "once_cell",
- "parking_lot",
  "pyo3",
  "pyo3-build-config",
  "tokio",
