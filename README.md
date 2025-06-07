@@ -36,6 +36,19 @@ python examples/client.py --peers 0.0.0.0:7010
 `duckdb_client.py` demonstrates integrating with DuckDB and is executed in the
 same way.
 
+`ticker_server.py` and `ticker_client.py` stream random price updates for a
+set of stock tickers. The client displays the rolling mean for each ticker.
+
+Run the ticker server:
+```bash
+python examples/ticker_server.py --listen 0.0.0.0:7011
+```
+
+Connect with the ticker client:
+```bash
+python examples/ticker_client.py --peers 0.0.0.0:7011
+```
+
 ## Running the tests
 
 Ensure your virtual environment is active and the module is built as described
