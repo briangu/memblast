@@ -27,13 +27,13 @@ con = duckdb.connect()
 # Register the numpy array ONCE. This is a live view into the shared memory,
 # so DuckDB will always see the latest data without re-registering.
 arr = node.ndarray()
-arr = arr.reshape([10,10])
+arr = arr.reshape([3,window])
 con.register('data', arr)
 
 while True:
     with node.read() as arr:
         data = np.array(arr).reshape(len(tickers), window)
-        means = con.execute('SELECT AVG(column0), AVG(column1), AVG(column2) FROM data').fetchall()[0][0]
+        means = con.execute('SELECT AVG(column0), AVG(column1), AVG(column2) FROM data').fetchall()[0]
         print("\033[H\033[J", end="")
         for t, m in zip(tickers, means):
             print(f'{t}: {m:.2f}')
