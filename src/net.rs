@@ -12,21 +12,22 @@ use crate::memory::Shared;
 pub struct Update {
     pub shape: Vec<u32>,
     pub start: u32,
-    pub vals: Vec<f64>,
+    pub len: u32,
 }
 
 impl Update {
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self, state: &Shared) -> Vec<u8> {
         let shape_len = self.shape.len() as u32;
-        let val_len = self.vals.len() as u32;
-        let mut buf = Vec::with_capacity(4 + self.shape.len() * 4 + 4 + 4 + self.vals.len() * 8);
+        let mut buf = Vec::with_capacity(4 + self.shape.len() * 4 + 4 + 4 + self.len as usize * 8);
         buf.extend_from_slice(&shape_len.to_le_bytes());
         for d in &self.shape {
             buf.extend_from_slice(&d.to_le_bytes());
         }
         buf.extend_from_slice(&self.start.to_le_bytes());
-        buf.extend_from_slice(&val_len.to_le_bytes());
-        for v in &self.vals {
+        buf.extend_from_slice(&self.len.to_le_bytes());
+        let start = self.start as usize;
+        for i in 0..self.len as usize {
+            let v = state.get(start + i);
             buf.extend_from_slice(&v.to_le_bytes());
         }
         buf
@@ -36,9 +37,7 @@ impl Update {
 fn snapshot_update(state: &Shared) -> Update {
     let shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
     let len: usize = state.shape().iter().product();
-    let mut buf = vec![0.0; len];
-    state.read_snapshot(&mut buf);
-    Update { shape, start: 0, vals: buf }
+    Update { shape, start: 0, len: len as u32 }
 }
 
 async fn read_exact_checked(sock: &mut TcpStream, buf: &mut [u8]) -> Result<bool> {
@@ -150,13 +149,13 @@ pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Update>, state:
                 let (mut sock, peer) = res?;
                 println!("accepted connection from {}", peer);
                 let snap = snapshot_update(&state);
-                if sock.write_all(&snap.to_bytes()).await.is_ok() {
+                if sock.write_all(&snap.to_bytes(&state)).await.is_ok() {
                     conns.push(sock);
                 }
             }
             res = rx.recv() => {
                 let u = match res { Ok(v) => v, Err(_) => break };
-                let data = u.to_bytes();
+                let data = u.to_bytes(&state);
                 let mut alive = Vec::new();
                 for mut s in conns {
                     match s.write_all(&data).await {
