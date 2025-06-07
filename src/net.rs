@@ -4,6 +4,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{self, Duration};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use crate::memory::Shared;
 
@@ -13,6 +14,12 @@ pub struct Update {
     pub shape: Vec<u32>,
     pub start: u32,
     pub len: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdatePacket {
+    pub updates: Vec<Update>,
+    pub meta: Option<String>,
 }
 
 impl Update {
@@ -34,11 +41,18 @@ impl Update {
     }
 }
 
-pub fn updates_to_bytes(updates: &[Update], state: &Shared) -> Vec<u8> {
+pub fn packet_to_bytes(packet: &UpdatePacket, state: &Shared) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
-    for u in updates {
+    buf.extend_from_slice(&(packet.updates.len() as u32).to_le_bytes());
+    for u in &packet.updates {
         buf.extend_from_slice(&u.to_bytes(state));
+    }
+    if let Some(meta) = &packet.meta {
+        let bytes = meta.as_bytes();
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(bytes);
+    } else {
+        buf.extend_from_slice(&(0u32.to_le_bytes()));
     }
     buf
 }
@@ -103,7 +117,7 @@ async fn read_values(sock: &mut TcpStream, len: usize) -> Result<Option<Vec<f64>
     Ok(Some(vals))
 }
 
-async fn read_update_set(sock: &mut TcpStream) -> Result<Option<Vec<(Vec<usize>, usize, Vec<f64>)>>> {
+async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>, usize, Vec<f64>)>, Option<String>)>> {
     let mut len_buf = [0u8; 4];
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
@@ -121,7 +135,21 @@ async fn read_update_set(sock: &mut TcpStream) -> Result<Option<Vec<(Vec<usize>,
         };
         updates.push((shape, start_idx, vals));
     }
-    Ok(Some(updates))
+    if !read_exact_checked(sock, &mut len_buf).await? {
+        return Ok(None);
+    }
+    let meta_len = u32::from_le_bytes(len_buf) as usize;
+    let meta = if meta_len > 0 {
+        let mut buf = vec![0u8; meta_len];
+        if !read_exact_checked(sock, &mut buf).await? {
+            return Ok(None);
+        }
+        Some(String::from_utf8_lossy(&buf).to_string())
+    } else {
+        None
+    };
+
+    Ok(Some((updates, meta)))
 }
 
 fn apply_update(state: &Shared, start_idx: usize, vals: &[f64], len: usize) -> Result<()> {
@@ -135,17 +163,18 @@ fn apply_update(state: &Shared, start_idx: usize, vals: &[f64], len: usize) -> R
     state.end_write()
 }
 
-pub async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
+pub async fn handle_peer(mut sock: TcpStream, state: Shared, meta: Arc<Mutex<Vec<String>>>) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
     let local_shape = state.shape().to_vec();
     let len: usize = local_shape.iter().product();
 
     loop {
-        let updates = match read_update_set(&mut sock).await? {
+        let packet = match read_update_set(&mut sock).await? {
             Some(v) => v,
             None => break,
         };
+        let (updates, metadata) = packet;
         for (shape, start_idx, vals) in updates {
             if shape != local_shape {
                 println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
@@ -153,12 +182,16 @@ pub async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
             }
             apply_update(&state, start_idx, &vals, len)?;
         }
+        if let Some(m) = metadata {
+            let mut q = meta.lock().unwrap();
+            q.push(m);
+        }
     }
     println!("peer {:?} disconnected", addr);
     Ok(())
 }
 
-pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Vec<Update>>, state: Shared) -> Result<()> {
+pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<UpdatePacket>, state: Shared) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     let mut conns: Vec<TcpStream> = Vec::new();
@@ -168,14 +201,14 @@ pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Vec<Update>>, s
                 let (mut sock, peer) = res?;
                 println!("accepted connection from {}", peer);
                 let snap = snapshot_update(&state);
-                let data = updates_to_bytes(&[snap], &state);
+                let data = packet_to_bytes(&UpdatePacket{updates: vec![snap], meta: None}, &state);
                 if sock.write_all(&data).await.is_ok() {
                     conns.push(sock);
                 }
             }
             res = rx.recv() => {
                 let u = match res { Ok(v) => v, Err(_) => break };
-                let data = updates_to_bytes(&u, &state);
+                let data = packet_to_bytes(&u, &state);
                 let mut alive = Vec::new();
                 for mut s in conns {
                     match s.write_all(&data).await {
@@ -190,14 +223,14 @@ pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Vec<Update>>, s
     Ok(())
 }
 
-pub async fn client(server: SocketAddr, state: Shared) -> Result<()> {
+pub async fn client(server: SocketAddr, state: Shared, meta: Arc<Mutex<Vec<String>>>) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
     loop {
         println!("connecting to server {}", server);
         match TcpStream::connect(server).await {
             Ok(sock) => {
                 println!("connected to {}", server);
-                let res = handle_peer(sock, state.clone()).await;
+                let res = handle_peer(sock, state.clone(), meta.clone()).await;
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }
