@@ -20,8 +20,8 @@ This project exposes a small Raft-backed shared memory buffer as a Python extens
 
 ## Running the examples
 
-The repository contains a simple server and two client examples located under
-`examples/`.
+The repository contains a number of example programs under `examples/`. The
+basic example is a simple server and client pair.
 
 Start a server in one terminal:
 ```bash
@@ -30,23 +30,21 @@ python examples/server.py --listen 0.0.0.0:7010
 
 In another terminal, connect with a client:
 ```bash
-python examples/client.py --peers 0.0.0.0:7010
+python examples/client.py --server 0.0.0.0:7010
 ```
 
-`duckdb_client.py` demonstrates integrating with DuckDB and is executed in the
-same way.
-
-`ticker_server.py` and `ticker_client.py` stream random price updates for a
-set of stock tickers. The client displays the rolling mean for each ticker.
+Additional example categories live under `examples/slices` and
+`examples/tickers`. The ticker examples stream random price updates for a set of
+stock tickers and the clients compute rolling statistics.
 
 Run the ticker server:
 ```bash
-python examples/ticker_server.py --listen 0.0.0.0:7011
+python examples/tickers/ticker_server.py --listen 0.0.0.0:7011
 ```
 
 Connect with the ticker client:
 ```bash
-python examples/ticker_client.py --peers 0.0.0.0:7011
+python examples/tickers/ticker_client.py --server 0.0.0.0:7011
 ```
 
 ## Running the tests
