@@ -22,7 +22,7 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 struct Node {
     name: String,
     state: Shared,
-    tx: async_channel::Sender<Update>,
+    tx: async_channel::Sender<Vec<Update>>, 
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
@@ -57,6 +57,7 @@ impl Node {
         if scratch.len() != self.len {
             scratch.resize(self.len, 0.0);
         }
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
         let mut start: Option<usize> = None;
         let mut end = 0usize;
         for i in 0..self.len {
@@ -67,20 +68,33 @@ impl Node {
                 }
                 end = i;
                 scratch[i] = v;
+            } else if let Some(s) = start {
+                ranges.push((s, end));
+                start = None;
             }
         }
         if let Some(s) = start {
-            let len = end - s + 1;
-            println!(
-                "{} flushing range {}..{} ({} values)",
-                self.name,
-                s,
-                end,
-                len
-            );
-            let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
-            let _ = self.tx.try_send(Update { shape, start: s as u32, len: len as u32 });
+            ranges.push((s, end));
         }
+        if ranges.is_empty() {
+            return;
+        }
+        let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
+        let updates: Vec<Update> = ranges
+            .into_iter()
+            .map(|(s, e)| {
+                let len = e - s + 1;
+                println!(
+                    "{} flushing range {}..{} ({} values)",
+                    self.name,
+                    s,
+                    e,
+                    len
+                );
+                Update { shape: shape.clone(), start: s as u32, len: len as u32 }
+            })
+            .collect();
+        let _ = self.tx.try_send(updates);
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
@@ -195,7 +209,7 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let state = Shared::new(buf);
-    let (tx, rx) = async_channel::bounded(1024);
+    let (tx, rx) = async_channel::bounded::<Vec<Update>>(1024);
 
     if let Some(addr) = listen {
         let listen_addr: SocketAddr = addr.parse()
