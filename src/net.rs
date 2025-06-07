@@ -34,6 +34,15 @@ impl Update {
     }
 }
 
+pub fn updates_to_bytes(updates: &[Update], state: &Shared) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
+    for u in updates {
+        buf.extend_from_slice(&u.to_bytes(state));
+    }
+    buf
+}
+
 fn snapshot_update(state: &Shared) -> Update {
     let shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
     let len: usize = state.shape().iter().product();
@@ -94,9 +103,25 @@ async fn read_values(sock: &mut TcpStream, len: usize) -> Result<Option<Vec<f64>
     Ok(Some(vals))
 }
 
-async fn discard_values(sock: &mut TcpStream, len: usize) -> Result<bool> {
-    let mut buf = vec![0u8; len * 8];
-    read_exact_checked(sock, &mut buf).await
+async fn read_update_set(sock: &mut TcpStream) -> Result<Option<Vec<(Vec<usize>, usize, Vec<f64>)>>> {
+    let mut len_buf = [0u8; 4];
+    if !read_exact_checked(sock, &mut len_buf).await? {
+        return Ok(None);
+    }
+    let count = u32::from_le_bytes(len_buf) as usize;
+    let mut updates = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (shape, start_idx, val_len) = match read_update_header(sock).await? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let vals = match read_values(sock, val_len).await? {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        updates.push((shape, start_idx, vals));
+    }
+    Ok(Some(updates))
 }
 
 fn apply_update(state: &Shared, start_idx: usize, vals: &[f64], len: usize) -> Result<()> {
@@ -117,29 +142,23 @@ pub async fn handle_peer(mut sock: TcpStream, state: Shared) -> Result<()> {
     let len: usize = local_shape.iter().product();
 
     loop {
-        let (shape, start_idx, val_len) = match read_update_header(&mut sock).await? {
+        let updates = match read_update_set(&mut sock).await? {
             Some(v) => v,
             None => break,
         };
-
-        if shape != local_shape {
-            println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
-            if !discard_values(&mut sock, val_len).await? { break; }
-            continue;
+        for (shape, start_idx, vals) in updates {
+            if shape != local_shape {
+                println!("shape mismatch: recv {:?} local {:?}", shape, state.shape());
+                continue;
+            }
+            apply_update(&state, start_idx, &vals, len)?;
         }
-
-        let vals = match read_values(&mut sock, val_len).await? {
-            Some(v) => v,
-            None => break,
-        };
-
-        apply_update(&state, start_idx, &vals, len)?;
     }
     println!("peer {:?} disconnected", addr);
     Ok(())
 }
 
-pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Update>, state: Shared) -> Result<()> {
+pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Vec<Update>>, state: Shared) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     let mut conns: Vec<TcpStream> = Vec::new();
@@ -149,13 +168,14 @@ pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Update>, state:
                 let (mut sock, peer) = res?;
                 println!("accepted connection from {}", peer);
                 let snap = snapshot_update(&state);
-                if sock.write_all(&snap.to_bytes(&state)).await.is_ok() {
+                let data = updates_to_bytes(&[snap], &state);
+                if sock.write_all(&data).await.is_ok() {
                     conns.push(sock);
                 }
             }
             res = rx.recv() => {
                 let u = match res { Ok(v) => v, Err(_) => break };
-                let data = u.to_bytes(&state);
+                let data = updates_to_bytes(&u, &state);
                 let mut alive = Vec::new();
                 for mut s in conns {
                     match s.write_all(&data).await {
