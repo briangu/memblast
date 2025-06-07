@@ -2,7 +2,7 @@ mod memory;
 mod net;
 
 use memory::{MmapBuf, Shared};
-use net::{client, serve, Update, UpdatePacket};
+use net::{client, serve, Update, UpdatePacket, Subscription, Mapping, Target};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -16,6 +16,7 @@ use tokio::runtime::Runtime;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
 use libc::{PROT_READ};
+use std::collections::HashMap;
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 
@@ -30,6 +31,8 @@ struct Node {
     meta_queue: Arc<Mutex<Vec<String>>>,
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
+    subscription: Option<Vec<net::Mapping>>,
+    named: Arc<HashMap<String, Shared>>,
 }
 
 #[pymethods]
@@ -53,6 +56,30 @@ impl Node {
                 std::ptr::null_mut(),
             );
             PyArray1::from_owned_ptr(py, arr_ptr)
+        }
+    }
+
+    fn named_ndarray<'py>(&'py self, py: Python<'py>, name: &str) -> Option<&'py PyArray1<f64>> {
+        let shared = self.named.get(name)?;
+        let shape = shared.shape();
+        let len: usize = shape.iter().product();
+        let dims: [npy_intp; 1] = [len as npy_intp];
+        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+        unsafe {
+            let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
+            let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
+            let arr_ptr = PY_ARRAY_API.PyArray_NewFromDescr(
+                py,
+                subtype,
+                descr,
+                dims.len() as c_int,
+                dims.as_ptr() as *mut npy_intp,
+                strides.as_ptr() as *mut npy_intp,
+                shared.mm.ptr(),
+                NPY_ARRAY_WRITEABLE,
+                std::ptr::null_mut(),
+            );
+            Some(PyArray1::from_owned_ptr(py, arr_ptr))
         }
     }
 
@@ -226,8 +253,15 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None))]
-fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>, shape: Option<Vec<usize>>) -> PyResult<Node> {
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None))]
+fn start(
+    _py: Python<'_>,
+    name: &str,
+    listen: Option<&str>,
+    server: Option<&str>,
+    shape: Option<Vec<usize>>,
+    maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
+) -> PyResult<Node> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -235,6 +269,27 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
+    let mut named_map: HashMap<String, Shared> = HashMap::new();
+    let subscription: Option<Vec<Mapping>> = if let Some(v) = maps {
+        let mut out = Vec::new();
+        for (srv_start, region_shape, client_start, name) in v {
+            let ss_u32: Vec<u32> = srv_start.iter().map(|&d| d as u32).collect();
+            let sh_u32: Vec<u32> = region_shape.iter().map(|&d| d as u32).collect();
+            let target = if let Some(nm) = name {
+                let buf = MmapBuf::new(region_shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let shared = Shared::new(buf);
+                named_map.insert(nm.clone(), shared);
+                net::Target::Named(nm)
+            } else {
+                let cs = client_start.unwrap_or_else(|| vec![0; srv_start.len()]);
+                let cs_u32: Vec<u32> = cs.iter().map(|&d| d as u32).collect();
+                net::Target::Region(cs_u32)
+            };
+            out.push(Mapping { server_start: ss_u32, shape: sh_u32, target });
+        }
+        Some(out)
+    } else { None };
+    let named_arc = Arc::new(named_map);
 
     if let Some(addr) = listen {
         let listen_addr: SocketAddr = addr.parse()
@@ -250,7 +305,16 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
             .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
         let st_clone = state.clone();
         let mq = meta_queue.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, mq));
+        let sub_maps = subscription.clone().unwrap_or_else(|| {
+            vec![Mapping {
+                server_start: vec![0u32; shape.len()],
+                shape: shape.iter().map(|&d| d as u32).collect(),
+                target: net::Target::Region(vec![0u32; shape.len()])
+            }]
+        });
+        let sub = Subscription { client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
+        let named_clone = named_arc.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -266,6 +330,8 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
         meta_queue,
         pending_meta,
         callback: RefCell::new(None),
+        subscription,
+        named: named_arc,
     })
 }
 
