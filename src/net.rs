@@ -77,6 +77,30 @@ pub fn packet_to_bytes(packet: &UpdatePacket, state: &Shared) -> Vec<u8> {
     buf
 }
 
+fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
+    for u in updates {
+        buf.extend_from_slice(&(u.shape.len() as u32).to_le_bytes());
+        for d in &u.shape {
+            buf.extend_from_slice(&d.to_le_bytes());
+        }
+        buf.extend_from_slice(&u.start.to_le_bytes());
+        buf.extend_from_slice(&(u.values.len() as u32).to_le_bytes());
+        for v in &u.values {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    if let Some(meta) = meta {
+        let bytes = meta.as_bytes();
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(bytes);
+    } else {
+        buf.extend_from_slice(&(0u32.to_le_bytes()));
+    }
+    buf
+}
+
 pub fn subscription_to_bytes(sub: &Subscription) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.push(1u8); // message type 1 for subscription
@@ -350,7 +374,18 @@ fn compute_segments(
     segs
 }
 
-fn filter_updates(updates: &[Update], sub: &Subscription, server_shape: &[u32]) -> Vec<Update> {
+struct FilteredUpdate {
+    shape: Vec<u32>,
+    start: u32,
+    values: Vec<f64>,
+}
+
+fn filter_updates(
+    updates: &[Update],
+    sub: &Subscription,
+    state: &Shared,
+    server_shape: &[u32],
+) -> Vec<FilteredUpdate> {
     let mut out = Vec::new();
     for m in &sub.maps {
         let client_shape = match &m.target {
@@ -377,10 +412,16 @@ fn filter_updates(updates: &[Update], sub: &Subscription, server_shape: &[u32]) 
                 let end = u_end.min(seg_end);
                 if start < end {
                     let offset = start - seg_start;
-                    out.push(Update {
+                    let dst_start = c_idx + offset;
+                    let len = end - start;
+                    let mut vals = Vec::with_capacity(len);
+                    for i in 0..len {
+                        vals.push(state.get(start + i));
+                    }
+                    out.push(FilteredUpdate {
                         shape: client_shape.to_vec(),
-                        start: (c_idx + offset) as u32,
-                        len: (end - start) as u32,
+                        start: dst_start as u32,
+                        values: vals,
                     });
                 }
             }
@@ -445,11 +486,13 @@ pub async fn serve(
             res = lst.accept() => {
                 let (mut sock, peer) = res?;
                 println!("accepted connection from {}", peer);
-                let snap = snapshot_update(&state);
-                let meta = pending_meta.lock().unwrap().clone();
-                let data = packet_to_bytes(&UpdatePacket{updates: vec![snap], meta}, &state);
-                if sock.write_all(&data).await.is_ok() {
-                    if let Some(sub) = read_subscription(&mut sock).await? {
+                if let Some(sub) = read_subscription(&mut sock).await? {
+                    let snap = snapshot_update(&state);
+                    let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
+                    let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
+                    let meta = pending_meta.lock().unwrap().clone();
+                    let data = filtered_to_bytes(&filtered, &meta);
+                    if sock.write_all(&data).await.is_ok() {
                         conns.push((sock, sub));
                     }
                 }
@@ -459,13 +502,12 @@ pub async fn serve(
                 let mut alive = Vec::new();
                 let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                 for (mut s, sub) in conns {
-                    let filtered = filter_updates(&u.updates, &sub, &server_shape);
+                    let filtered = filter_updates(&u.updates, &sub, &state, &server_shape);
                     if filtered.is_empty() && u.meta.is_none() {
                         alive.push((s, sub));
                         continue;
                     }
-                    let packet = UpdatePacket { updates: filtered, meta: u.meta.clone() };
-                    let data = packet_to_bytes(&packet, &state);
+                    let data = filtered_to_bytes(&filtered, &u.meta);
                     match s.write_all(&data).await {
                         Ok(_) => alive.push((s, sub)),
                         Err(e) => println!("send failed: {}", e),
