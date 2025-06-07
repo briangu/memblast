@@ -1,9 +1,9 @@
 import time
-import raftmem
+import memblast
 
 
 def test_snapshot_on_connect():
-    node_a = raftmem.start("a", listen="127.0.0.1:7200", shape=[2])
+    node_a = memblast.start("a", listen="127.0.0.1:7200", shape=[2])
     with node_a.write() as arr:
         arr[0] = 1.5
         arr[1] = 2.5
@@ -14,7 +14,7 @@ def test_snapshot_on_connect():
     def cb(d):
         meta.update(d)
 
-    node_b = raftmem.start("b", server="127.0.0.1:7200", shape=[2])
+    node_b = memblast.start("b", server="127.0.0.1:7200", shape=[2])
     node_b.on_update(cb)
     node_a.send_meta({"last_index": 1})
     node_a.flush(0)
@@ -28,7 +28,7 @@ def test_snapshot_on_connect():
 
 
 def test_slice_snapshot():
-    node_a = raftmem.start("sa", listen="127.0.0.1:7201", shape=[4])
+    node_a = memblast.start("sa", listen="127.0.0.1:7201", shape=[4])
     with node_a.write() as arr:
         arr[0] = 1.0
         arr[1] = 2.0
@@ -37,7 +37,7 @@ def test_slice_snapshot():
     time.sleep(1)
 
     maps = [([1], [2], [0], None)]
-    node_b = raftmem.start("sb", server="127.0.0.1:7201", shape=[2], maps=maps)
+    node_b = memblast.start("sb", server="127.0.0.1:7201", shape=[2], maps=maps)
     time.sleep(2)
     with node_b.read() as arr:
         assert list(arr) == [2.0, 3.0]

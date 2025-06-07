@@ -314,7 +314,7 @@ fn start(
 }
 
 #[pymodule]
-fn raftmem(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn memblast(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<Node>()?;
     m.add_class::<WriteGuard>()?;
     m.add_class::<ReadGuard>()?;

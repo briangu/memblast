@@ -1,5 +1,5 @@
 [package]
-name = "raftmem"
+name = "memblast"
 version = "0.1.0"
 edition = "2021"
 authors = ["Your Name <you@example.com>"]
@@ -8,7 +8,7 @@ description = "Embedded, replicated shared NumPy array demo"
 readme = "README.md"
 
 [lib]
-name = "raftmem"
+name = "memblast"
 # `cdylib` builds a native dynamic library that Python can import
 crate-type = ["cdylib"]
 

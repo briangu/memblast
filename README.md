@@ -1,4 +1,4 @@
-# raftmem
+# memblast
 
 This project exposes a small Raft-backed shared memory buffer as a Python extension module.
 
