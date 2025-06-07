@@ -90,6 +90,12 @@ fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u
         for v in &u.values {
             buf.extend_from_slice(&v.to_le_bytes());
         }
+        if let Some(name) = &u.name {
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name.as_bytes());
+        } else {
+            buf.extend_from_slice(&(0u32.to_le_bytes()));
+        }
     }
     if let Some(meta) = meta {
         let bytes = meta.as_bytes();
@@ -269,7 +275,7 @@ async fn read_values(sock: &mut TcpStream, len: usize) -> Result<Option<Vec<f64>
     Ok(Some(vals))
 }
 
-async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>, usize, Vec<f64>)>, Option<String>)>> {
+async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>, usize, Vec<f64>, Option<String>)>, Option<String>)>> {
     let mut len_buf = [0u8; 4];
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
@@ -285,7 +291,14 @@ async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>
             Some(v) => v,
             None => return Ok(None),
         };
-        updates.push((shape, start_idx, vals));
+        if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
+        let name_len = u32::from_le_bytes(len_buf) as usize;
+        let name = if name_len > 0 {
+            let mut buf = vec![0u8; name_len];
+            if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
+            Some(String::from_utf8_lossy(&buf).to_string())
+        } else { None };
+        updates.push((shape, start_idx, vals, name));
     }
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
@@ -378,6 +391,7 @@ struct FilteredUpdate {
     shape: Vec<u32>,
     start: u32,
     values: Vec<f64>,
+    name: Option<String>,
 }
 
 fn filter_updates(
@@ -418,10 +432,15 @@ fn filter_updates(
                     for i in 0..len {
                         vals.push(state.get(start + i));
                     }
+                    let name = match &m.target {
+                        Target::Named(nm) => Some(nm.clone()),
+                        _ => None,
+                    };
                     out.push(FilteredUpdate {
                         shape: client_shape.to_vec(),
                         start: dst_start as u32,
                         values: vals,
+                        name,
                     });
                 }
             }
@@ -440,11 +459,7 @@ pub async fn handle_peer(
     println!("peer {:?} connected", addr);
     let local_shape = state.shape().to_vec();
     let len: usize = state.shape().iter().product();
-    let mut named_map: HashMap<Vec<usize>, Shared> = HashMap::new();
-    for (_k, v) in named.iter() {
-        let shp: Vec<usize> = v.shape().to_vec();
-        named_map.insert(shp, v.clone());
-    }
+    let named_map = named.clone();
 
     loop {
         let packet = match read_update_set(&mut sock).await? {
@@ -452,12 +467,16 @@ pub async fn handle_peer(
             None => break,
         };
         let (updates, metadata) = packet;
-        for (shape, start_idx, vals) in updates {
-            if shape == local_shape {
+        for (shape, start_idx, vals, name) in updates {
+            if shape == local_shape && name.is_none() {
                 apply_update(&state, start_idx, &vals, len)?;
-            } else if let Some(dst) = named_map.get(&shape) {
-                let l: usize = dst.shape().iter().product();
-                apply_update(dst, start_idx, &vals, l)?;
+            } else if let Some(nm) = name {
+                if let Some(dst) = named_map.get(&nm) {
+                    let l: usize = dst.shape().iter().product();
+                    apply_update(dst, start_idx, &vals, l)?;
+                } else {
+                    println!("unknown named slice {}", nm);
+                }
             } else {
                 println!("shape mismatch: recv {:?} local {:?}", shape, local_shape);
                 continue;
