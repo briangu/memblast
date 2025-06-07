@@ -12,7 +12,6 @@ use crate::memory::Shared;
 
 #[derive(Debug, Clone)]
 pub struct Update {
-    pub shape: Vec<u32>,
     pub start: u32,
     pub len: u32,
 }
@@ -42,40 +41,7 @@ pub struct Subscription {
     pub maps: Vec<Mapping>,
 }
 
-impl Update {
-    pub fn to_bytes(&self, state: &Shared) -> Vec<u8> {
-        let shape_len = self.shape.len() as u32;
-        let mut buf = Vec::with_capacity(4 + self.shape.len() * 4 + 4 + 4 + self.len as usize * 8);
-        buf.extend_from_slice(&shape_len.to_le_bytes());
-        for d in &self.shape {
-            buf.extend_from_slice(&d.to_le_bytes());
-        }
-        buf.extend_from_slice(&self.start.to_le_bytes());
-        buf.extend_from_slice(&self.len.to_le_bytes());
-        let start = self.start as usize;
-        for i in 0..self.len as usize {
-            let v = state.get(start + i);
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        buf
-    }
-}
 
-pub fn packet_to_bytes(packet: &UpdatePacket, state: &Shared) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&(packet.updates.len() as u32).to_le_bytes());
-    for u in &packet.updates {
-        buf.extend_from_slice(&u.to_bytes(state));
-    }
-    if let Some(meta) = &packet.meta {
-        let bytes = meta.as_bytes();
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(bytes);
-    } else {
-        buf.extend_from_slice(&(0u32.to_le_bytes()));
-    }
-    buf
-}
 
 fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -143,9 +109,8 @@ pub fn subscription_to_bytes(sub: &Subscription) -> Vec<u8> {
 }
 
 fn snapshot_update(state: &Shared) -> Update {
-    let shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
     let len: usize = state.shape().iter().product();
-    Update { shape, start: 0, len: len as u32 }
+    Update { start: 0, len: len as u32 }
 }
 
 async fn read_exact_checked(sock: &mut TcpStream, buf: &mut [u8]) -> Result<bool> {
