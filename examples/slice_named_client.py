@@ -20,7 +20,7 @@ while True:
     with node.read():
         print("\033[H\033[J", end="")
         for t in tickers:
-            arr = node.named_ndarray(f'ticker_{t}')
+            arr = node.ndarray(f'ticker_{t}')
             if arr is not None:
                 data = np.array(arr).reshape(1, args.window)
                 print(f'{t}: {data[0]}')

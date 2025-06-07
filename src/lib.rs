@@ -37,31 +37,14 @@ struct Node {
 
 #[pymethods]
 impl Node {
-    #[getter]
-    fn ndarray<'py>(&'py self, py: Python<'py>) -> &'py PyArray1<f64> {
-        let dims: [npy_intp; 1] = [self.len as npy_intp];
-        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
-        unsafe {
-            let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
-            let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
-            let arr_ptr = PY_ARRAY_API.PyArray_NewFromDescr(
-                py,
-                subtype,
-                descr,
-                dims.len() as c_int,
-                dims.as_ptr() as *mut npy_intp,
-                strides.as_ptr() as *mut npy_intp,
-                self.state.mm.ptr(),
-                NPY_ARRAY_WRITEABLE,
-                std::ptr::null_mut(),
-            );
-            PyArray1::from_owned_ptr(py, arr_ptr)
-        }
-    }
+    fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
+        let (ptr, shape) = if let Some(n) = name {
+            let shared = self.named.get(n)?;
+            (shared.mm.ptr(), shared.shape())
+        } else {
+            (self.state.mm.ptr(), self.shape.as_slice())
+        };
 
-    fn named_ndarray<'py>(&'py self, py: Python<'py>, name: &str) -> Option<&'py PyArray1<f64>> {
-        let shared = self.named.get(name)?;
-        let shape = shared.shape();
         let len: usize = shape.iter().product();
         let dims: [npy_intp; 1] = [len as npy_intp];
         let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
@@ -75,7 +58,7 @@ impl Node {
                 dims.len() as c_int,
                 dims.as_ptr() as *mut npy_intp,
                 strides.as_ptr() as *mut npy_intp,
-                shared.mm.ptr(),
+                ptr,
                 NPY_ARRAY_WRITEABLE,
                 std::ptr::null_mut(),
             );
