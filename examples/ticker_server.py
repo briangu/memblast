@@ -1,7 +1,7 @@
 import argparse
 import random
 import time
-import raftmem
+import memblast
 import sys
 
 parser = argparse.ArgumentParser()
@@ -12,7 +12,7 @@ args = parser.parse_args()
 
 tickers = args.tickers.split(',')
 window = args.window
-node = raftmem.start("ticker_server", listen=args.listen, shape=[len(tickers), window])
+node = memblast.start("ticker_server", listen=args.listen, shape=[len(tickers), window])
 
 index = 0
 while True:

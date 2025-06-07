@@ -1,7 +1,7 @@
 import argparse
 import random
 import time
-import raftmem
+import memblast
 import sys
 
 parser = argparse.ArgumentParser()
@@ -10,7 +10,7 @@ parser.add_argument('--tickers', type=int, default=100)
 parser.add_argument('--window', type=int, default=5)
 args = parser.parse_args()
 
-node = raftmem.start('slice_server', listen=args.listen, shape=[args.tickers, args.window])
+node = memblast.start('slice_server', listen=args.listen, shape=[args.tickers, args.window])
 
 index = 0
 while True:

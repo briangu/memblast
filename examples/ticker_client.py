@@ -1,7 +1,7 @@
 import argparse
 import time
 import numpy as np
-import raftmem
+import memblast
 import sys
 
 parser = argparse.ArgumentParser()
@@ -12,7 +12,7 @@ args = parser.parse_args()
 
 tickers = args.tickers.split(',')
 window = args.window
-node = raftmem.start("ticker_client", server=args.peers, shape=[len(tickers), window])
+node = memblast.start("ticker_client", server=args.peers, shape=[len(tickers), window])
 
 
 def handle_update(meta):

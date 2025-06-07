@@ -1,7 +1,7 @@
 import argparse
 import numpy as np
 import time
-import raftmem
+import memblast
 import sys
 
 parser = argparse.ArgumentParser()
@@ -14,7 +14,7 @@ tickers = [int(t) for t in args.tickers.split(',') if t]
 
 maps = [([t, 0], [1, args.window], None, f'ticker_{t}') for t in tickers]
 
-node = raftmem.start('named_client', server=args.peers, shape=[1], maps=maps)
+node = memblast.start('named_client', server=args.peers, shape=[1], maps=maps)
 
 while True:
     with node.read():

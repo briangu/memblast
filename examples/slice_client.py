@@ -1,7 +1,7 @@
 import argparse
 import numpy as np
 import time
-import raftmem
+import memblast
 import sys
 
 parser = argparse.ArgumentParser()
@@ -16,7 +16,7 @@ maps = []
 for i, t in enumerate(tickers):
     maps.append(([t, 0], [1, args.window], [i, 0], None))
 
-node = raftmem.start('slice_client', server=args.peers, shape=[len(tickers), args.window], maps=maps)
+node = memblast.start('slice_client', server=args.peers, shape=[len(tickers), args.window], maps=maps)
 
 while True:
     with node.read() as arr:

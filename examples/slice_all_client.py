@@ -1,13 +1,13 @@
 import argparse
 import time
-import raftmem
+import memblast
 import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--peers', default='0.0.0.0:7020')
 args = parser.parse_args()
 
-node = raftmem.start("b", server=args.peers, shape=[100,5])
+node = memblast.start("b", server=args.peers, shape=[100,5])
 
 
 def handle_update(meta):
