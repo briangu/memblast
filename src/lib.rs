@@ -2,7 +2,7 @@ mod memory;
 mod net;
 
 use memory::{MmapBuf, Shared};
-use net::{client, serve, Update};
+use net::{client, serve, Update, UpdatePacket};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -11,6 +11,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
@@ -22,10 +23,13 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 struct Node {
     name: String,
     state: Shared,
-    tx: async_channel::Sender<Vec<Update>>,
+    tx: async_channel::Sender<UpdatePacket>,
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
+    meta_queue: Arc<Mutex<Vec<String>>>,
+    pending_meta: Arc<Mutex<Option<String>>>,
+    callback: RefCell<Option<Py<PyAny>>>,
 }
 
 #[pymethods]
@@ -76,7 +80,8 @@ impl Node {
         if let Some(s) = start {
             ranges.push((s, end));
         }
-        if ranges.is_empty() {
+        let meta = self.pending_meta.lock().unwrap().take();
+        if ranges.is_empty() && meta.is_none() {
             return;
         }
         let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
@@ -87,7 +92,31 @@ impl Node {
                 Update { shape: shape.clone(), start: s as u32, len: len as u32 }
             })
             .collect();
-        let _ = self.tx.try_send(updates);
+        let packet = UpdatePacket { updates, meta };
+        let _ = self.tx.try_send(packet);
+    }
+
+    fn send_meta(&self, meta: &PyAny) -> PyResult<()> {
+        let py = meta.py();
+        let json = PyModule::import(py, "json")?.call_method1("dumps", (meta,))?.extract::<String>()?;
+        *self.pending_meta.lock().unwrap() = Some(json);
+        Ok(())
+    }
+
+    fn on_update(&self, cb: PyObject) {
+        *self.callback.borrow_mut() = Some(cb);
+    }
+
+    fn process_meta(&self, py: Python<'_>) -> PyResult<()> {
+        if let Some(cb) = self.callback.borrow().as_ref() {
+            let loads = PyModule::import(py, "json")?.getattr("loads")?;
+            let mut q = self.meta_queue.lock().unwrap();
+            for item in q.drain(..) {
+                let obj = loads.call1((item,))?;
+                cb.call1(py, (obj,))?;
+            }
+        }
+        Ok(())
     }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
@@ -97,6 +126,7 @@ impl Node {
 
     fn read<'py>(slf: PyRef<'py, Self>) -> PyResult<ReadGuard> {
         let py = slf.py();
+        slf.process_meta(py)?;
         let node_ref: Py<Node> = unsafe { Py::from_borrowed_ptr(py, slf.as_ptr()) };
         let mut scratch = slf.scratch.borrow_mut();
         if scratch.len() != slf.len {
@@ -202,7 +232,9 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let state = Shared::new(buf);
-    let (tx, rx) = async_channel::bounded::<Vec<Update>>(1024);
+    let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
+    let meta_queue = Arc::new(Mutex::new(Vec::new()));
+    let pending_meta = Arc::new(Mutex::new(None));
 
     if let Some(addr) = listen {
         let listen_addr: SocketAddr = addr.parse()
@@ -216,7 +248,8 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
         let server_addr: SocketAddr = addr.parse()
             .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
         let st_clone = state.clone();
-        RUNTIME.spawn(client(server_addr, st_clone));
+        let mq = meta_queue.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, mq));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -229,6 +262,9 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
         shape,
         len,
         scratch: RefCell::new(vec![0.0; len]),
+        meta_queue,
+        pending_meta,
+        callback: RefCell::new(None),
     })
 }
 
