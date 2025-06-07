@@ -191,7 +191,12 @@ pub async fn handle_peer(mut sock: TcpStream, state: Shared, meta: Arc<Mutex<Vec
     Ok(())
 }
 
-pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<UpdatePacket>, state: Shared) -> Result<()> {
+pub async fn serve(
+    addr: SocketAddr,
+    rx: async_channel::Receiver<UpdatePacket>,
+    state: Shared,
+    pending_meta: Arc<Mutex<Option<String>>>,
+) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     let mut conns: Vec<TcpStream> = Vec::new();
@@ -201,7 +206,8 @@ pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<UpdatePacket>, 
                 let (mut sock, peer) = res?;
                 println!("accepted connection from {}", peer);
                 let snap = snapshot_update(&state);
-                let data = packet_to_bytes(&UpdatePacket{updates: vec![snap], meta: None}, &state);
+                let meta = pending_meta.lock().unwrap().clone();
+                let data = packet_to_bytes(&UpdatePacket{updates: vec![snap], meta}, &state);
                 if sock.write_all(&data).await.is_ok() {
                     conns.push(sock);
                 }

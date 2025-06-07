@@ -241,7 +241,8 @@ fn start(_py: Python<'_>, name: &str, listen: Option<&str>, server: Option<&str>
             .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
         let st_clone = state.clone();
         let rx_clone = rx.clone();
-        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone));
+        let pm = pending_meta.clone();
+        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm));
     }
 
     if let Some(addr) = server {
