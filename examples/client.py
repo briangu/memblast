@@ -1,6 +1,7 @@
 import argparse
 import time
 import raftmem
+import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--peers', default='0.0.0.0:7010')
@@ -10,6 +11,8 @@ node = raftmem.start("b", server=args.peers, shape=[10,10])
 
 while True:
     with node.read() as arr:
-        print(arr)  # will follow writes from A
+        print("\033[H\033[J", end="")  # Move cursor to home position and clear screen
+        print(arr)
+        sys.stdout.flush()
     time.sleep(1)
 
