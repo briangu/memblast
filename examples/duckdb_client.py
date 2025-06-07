@@ -8,7 +8,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--peers', default='0.0.0.0:7010')
 args = parser.parse_args()
 
-node = raftmem.start("duck", server=args.peers, shape=[10])
+node = raftmem.start("duck", server=args.peers, shape=[10,10])
 con = duckdb.connect()
 
 while True:
