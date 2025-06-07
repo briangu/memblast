@@ -22,7 +22,7 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 struct Node {
     name: String,
     state: Shared,
-    tx: async_channel::Sender<Vec<Update>>, 
+    tx: async_channel::Sender<Vec<Update>>,
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
@@ -84,13 +84,6 @@ impl Node {
             .into_iter()
             .map(|(s, e)| {
                 let len = e - s + 1;
-                println!(
-                    "{} flushing range {}..{} ({} values)",
-                    self.name,
-                    s,
-                    e,
-                    len
-                );
                 Update { shape: shape.clone(), start: s as u32, len: len as u32 }
             })
             .collect();

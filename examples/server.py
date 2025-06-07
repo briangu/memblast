@@ -3,6 +3,7 @@ import random
 import time
 import numpy as np
 import raftmem
+import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--listen', default='0.0.0.0:7010')
@@ -16,6 +17,8 @@ while True:
             idx = random.randrange(len(a))
             a[idx] = random.random()
     with node.read() as arr:
+        print("\033[H\033[J", end="")  # Move cursor to home position and clear screen
         print(arr)
+        sys.stdout.flush()
     time.sleep(1)                    # write flushes on __exit__
 
