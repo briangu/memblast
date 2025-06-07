@@ -2,7 +2,7 @@ mod memory;
 mod net;
 
 use memory::{MmapBuf, Shared};
-use net::{client, serve, Update, UpdatePacket, Subscription, Mapping, Target};
+use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -22,7 +22,6 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 
 #[pyclass]
 struct Node {
-    name: String,
     state: Shared,
     tx: async_channel::Sender<UpdatePacket>,
     shape: Vec<usize>,
@@ -31,7 +30,6 @@ struct Node {
     meta_queue: Arc<Mutex<Vec<String>>>,
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
-    subscription: Option<Vec<net::Mapping>>,
     named: Arc<HashMap<String, Shared>>,
 }
 
@@ -94,12 +92,11 @@ impl Node {
         if ranges.is_empty() && meta.is_none() {
             return;
         }
-        let shape: Vec<u32> = self.shape.iter().map(|&d| d as u32).collect();
         let updates: Vec<Update> = ranges
             .into_iter()
             .map(|(s, e)| {
                 let len = e - s + 1;
-                Update { shape: shape.clone(), start: s as u32, len: len as u32 }
+                Update { start: s as u32, len: len as u32 }
             })
             .collect();
         let packet = UpdatePacket { updates, meta };
@@ -304,7 +301,6 @@ fn start(
 
     println!("node {} running with listen={:?} server={:?} shape {:?}", name, listen, server, shape);
     Ok(Node {
-        name: name.to_string(),
         state,
         tx,
         shape,
@@ -313,7 +309,6 @@ fn start(
         meta_queue,
         pending_meta,
         callback: RefCell::new(None),
-        subscription,
         named: named_arc,
     })
 }
