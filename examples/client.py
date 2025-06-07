@@ -4,10 +4,10 @@ import memblast
 import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--peers', default='0.0.0.0:7010')
+parser.add_argument('--server', default='0.0.0.0:7010')
 args = parser.parse_args()
 
-node = memblast.start("b", server=args.peers, shape=[10,10])
+node = memblast.start("b", server=args.server, shape=[10,10])
 
 
 def handle_update(meta):

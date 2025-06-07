@@ -5,10 +5,10 @@ import duckdb
 import memblast
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--peers', default='0.0.0.0:7010')
+parser.add_argument('--server', default='0.0.0.0:7010')
 args = parser.parse_args()
 
-node = memblast.start("duck", server=args.peers, shape=[10,10])
+node = memblast.start("duck", server=args.server, shape=[10,10])
 con = duckdb.connect()
 
 # Register the numpy array ONCE. This is a live view into the shared memory,

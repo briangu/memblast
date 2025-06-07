@@ -5,14 +5,14 @@ import memblast
 import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--peers', default='0.0.0.0:7011')
+parser.add_argument('--server', default='0.0.0.0:7011')
 parser.add_argument('--tickers', default='AAPL,GOOG,MSFT')
 parser.add_argument('--window', type=int, default=5)
 args = parser.parse_args()
 
 tickers = args.tickers.split(',')
 window = args.window
-node = memblast.start("ticker_client", server=args.peers, shape=[len(tickers), window])
+node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window])
 
 
 def handle_update(meta):

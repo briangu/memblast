@@ -20,8 +20,7 @@ while True:
             last = idx
         node.send_meta({"last_index": last})
     with node.read() as arr:
-        print("\033[H\033[J", end="")  # Move cursor to home position and clear screen
+        print("\033[H\033[J", end="")
         print(arr)
         sys.stdout.flush()
-    time.sleep(1)                    # write flushes on __exit__
-
+    time.sleep(1)
