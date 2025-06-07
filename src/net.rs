@@ -34,22 +34,10 @@ impl Update {
     }
 }
 
-fn snapshot_bytes(state: &Shared) -> Vec<u8> {
+fn snapshot_update(state: &Shared) -> Update {
     let shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
     let len: usize = state.shape().iter().product();
-    let shape_len = shape.len() as u32;
-    let mut buf = Vec::with_capacity(4 + shape.len() * 4 + 4 + 4 + len * 8);
-    buf.extend_from_slice(&shape_len.to_le_bytes());
-    for d in &shape {
-        buf.extend_from_slice(&d.to_le_bytes());
-    }
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&(len as u32).to_le_bytes());
-    for i in 0..len {
-        let v = state.get(i);
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    buf
+    Update { shape, start: 0, len: len as u32 }
 }
 
 async fn read_exact_checked(sock: &mut TcpStream, buf: &mut [u8]) -> Result<bool> {
@@ -160,8 +148,8 @@ pub async fn serve(addr: SocketAddr, rx: async_channel::Receiver<Update>, state:
             res = lst.accept() => {
                 let (mut sock, peer) = res?;
                 println!("accepted connection from {}", peer);
-                let snap = snapshot_bytes(&state);
-                if sock.write_all(&snap).await.is_ok() {
+                let snap = snapshot_update(&state);
+                if sock.write_all(&snap.to_bytes(&state)).await.is_ok() {
                     conns.push(sock);
                 }
             }
