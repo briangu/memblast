@@ -11,12 +11,14 @@ args = parser.parse_args()
 node = raftmem.start("duck", server=args.peers, shape=[10,10])
 con = duckdb.connect()
 
+arr = node.ndarray()
+# Register the numpy array ONCE. This is a live view into the shared memory,
+# so DuckDB will always see the latest data without re-registering.
+con.register('data', arr)
+
 while True:
     with node.read() as arr:
-        # make a copy so duckdb owns the buffer
-        np_arr = np.array(arr)
-        con.register('raft', np_arr)
-        result = con.execute('SELECT AVG(column0) FROM raft').fetchall()[0][0]
+        result = con.execute('SELECT AVG(column0) FROM data').fetchall()[0][0]
         print("\033[H\033[J", end="")
         print('average', result)
     time.sleep(1)
