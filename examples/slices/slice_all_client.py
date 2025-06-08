@@ -4,10 +4,10 @@ import memblast
 import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--server', default='0.0.0.0:7020')
+parser.add_argument("--server", default="0.0.0.0:7020")
 args = parser.parse_args()
 
-node = memblast.start("b", server=args.server, shape=[100,5])
+node = memblast.start("b", server=args.server, shape=[100, 5])
 
 
 async def handle_update(meta):
@@ -18,7 +18,9 @@ async def handle_update(meta):
         sys.stdout.flush()
 
 
-node.on_update_async(handle_update)
+async def main():
+    node.on_update_async(handle_update)
+    await asyncio.Event().wait()
 
-asyncio.get_event_loop().run_forever()
 
+asyncio.run(main())

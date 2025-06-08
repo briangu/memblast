@@ -3,7 +3,8 @@
 These programs demonstrate mapping portions of a large shared array to clients.
 A server maintains a `(tickers x window)` buffer of random data. Each client
 selects slices of that buffer in different ways. The scripts use the
-`on_update_async` callback rather than polling for updates.
+`on_update_async` callback rather than polling for updates. **Make sure to
+register the callback after the event loop starts.**
 
 ## Files
 

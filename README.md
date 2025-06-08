@@ -22,8 +22,9 @@ This project exposes a small Raft-backed shared memory buffer as a Python extens
 
 The repository contains a number of example programs under `examples/`. These
 scripts are event driven – each registers an asynchronous callback with
-`node.on_update_async` that runs whenever new data arrives. The basic example is
-a simple server and client pair.
+`node.on_update_async` that runs whenever new data arrives. **Call this method
+from within an async function so a running event loop exists**. The basic
+example is a simple server and client pair.
 
 Start a server in one terminal:
 ```bash
