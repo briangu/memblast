@@ -511,24 +511,25 @@ pub async fn client(
     meta: Arc<Mutex<Vec<String>>>,
     sub: Subscription,
 ) -> Result<()> {
-    let mut interval = time::interval(Duration::from_secs(1));
+    let mut delay = Duration::from_secs(1);
     loop {
         println!("connecting to server {}", server);
         match TcpStream::connect(server).await {
             Ok(mut sock) => {
                 println!("connected to {}", server);
                 let data = subscription_to_bytes(&sub);
-                if sock.write_all(&data).await.is_err() {
-                    continue;
-                }
-                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone()).await;
-                if let Err(e) = res {
-                    println!("connection error {}: {}", server, e);
+                if sock.write_all(&data).await.is_ok() {
+                    delay = Duration::from_secs(1);
+                    let res = handle_peer(sock, state.clone(), named.clone(), meta.clone()).await;
+                    if let Err(e) = res {
+                        println!("connection error {}: {}", server, e);
+                    }
                 }
             }
             Err(e) => println!("failed to connect to {}: {}", server, e),
         }
-        interval.tick().await;
+        time::sleep(delay).await;
+        delay = core::cmp::min(delay * 2, Duration::from_secs(8));
     }
 }
 
