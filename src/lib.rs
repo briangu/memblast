@@ -24,6 +24,8 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 struct Node {
     state: Shared,
     tx: async_channel::Sender<UpdatePacket>,
+    #[pyo3(get)]
+    name: String,
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
@@ -303,6 +305,7 @@ fn start(
     Ok(Node {
         state,
         tx,
+        name: name.to_string(),
         shape,
         len,
         scratch: RefCell::new(vec![0.0; len]),
