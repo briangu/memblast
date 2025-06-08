@@ -17,9 +17,7 @@ while True:
     with node.write() as arr:
         arr = arr.reshape(args.tickers, args.window)
         for i in range(args.tickers):
-            # Slide existing values to the left and append a new one at the end
-            arr[i, :-1] = arr[i, 1:]
-            arr[i, -1] = random.uniform(100.0, 200.0)
+            arr[i, index % args.window] = random.uniform(100.0, 200.0)
         node.send_meta({'index': index})
     index += 1
     with node.read() as data:
