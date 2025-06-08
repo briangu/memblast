@@ -1,6 +1,10 @@
 # Example Programs
 
-This directory contains small programs demonstrating how to use **memblast**. Make sure the package is built with:
+This directory contains small programs demonstrating how to use **memblast**.
+All examples are event driven and use the `on_update_async` callback rather than
+polling for changes. **Register the callback inside an async function so the
+event loop is running.**
+Make sure the package is built with:
 
 ```bash
 maturin develop --release
@@ -11,7 +15,7 @@ All commands below should be run from the repository root.
 ## Basic shared buffer
 
 - `server.py` – Starts a server hosting a 10×10 array and updates a few random values every second.
-- `client.py` – Connects to the server and prints the array along with any metadata updates.
+- `client.py` – Connects to the server and prints the array whenever the update callback fires.
 
 Run them in separate terminals:
 

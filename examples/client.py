@@ -1,25 +1,26 @@
 import argparse
-import time
+import asyncio
 import memblast
 import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--server', default='0.0.0.0:7010')
+parser.add_argument("--server", default="0.0.0.0:7010")
 args = parser.parse_args()
 
-node = memblast.start("b", server=args.server, shape=[10,10])
+node = memblast.start("b", server=args.server, shape=[10, 10])
 
 
-def handle_update(meta):
+async def handle_update(meta):
     print("metadata", meta)
-
-
-node.on_update(handle_update)
-
-while True:
     with node.read() as arr:
         print("\033[H\033[J", end="")  # Move cursor to home position and clear screen
         print(arr)
         sys.stdout.flush()
-    time.sleep(1)
 
+
+async def main():
+    node.on_update_async(handle_update)
+    await asyncio.Event().wait()
+
+
+asyncio.run(main())

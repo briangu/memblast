@@ -1,6 +1,6 @@
 import argparse
+import asyncio
 import random
-import time
 import numpy as np
 import memblast
 import sys
@@ -11,16 +11,21 @@ args = parser.parse_args()
 
 node = memblast.start("a", listen=args.listen, shape=[10,10])
 
-while True:
-    with node.write() as a:
-        last = 0
-        for _ in range(3):
-            idx = random.randrange(len(a))
-            a[idx] = random.random()
-            last = idx
-        node.send_meta({"last_index": last})
-    with node.read() as arr:
-        print("\033[H\033[J", end="")
-        print(arr)
-        sys.stdout.flush()
-    time.sleep(1)
+
+async def main():
+    while True:
+        with node.write() as a:
+            last = 0
+            for _ in range(3):
+                idx = random.randrange(len(a))
+                a[idx] = random.random()
+                last = idx
+            node.send_meta({"last_index": last})
+        with node.read() as arr:
+            print("\033[H\033[J", end="")
+            print(arr)
+            sys.stdout.flush()
+        await asyncio.sleep(1)
+
+
+asyncio.run(main())

@@ -8,11 +8,13 @@ use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3_asyncio;
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
+use tokio::sync::Notify;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
 use libc::{PROT_READ};
@@ -33,6 +35,7 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 #[pymethods]
@@ -114,6 +117,59 @@ impl Node {
 
     fn on_update(&self, cb: PyObject) {
         *self.callback.borrow_mut() = Some(cb);
+    }
+
+    fn on_update_async(&self, py: Python<'_>, cb: PyObject) -> PyResult<()> {
+        let notify = self.notify.clone();
+        let meta_queue = self.meta_queue.clone();
+        let cb_handle: Py<PyAny> = cb.into_py(py);
+        let event_loop = py
+            .import("asyncio")?
+            .call_method0("get_running_loop")?
+            .into_py(py);
+        RUNTIME.spawn(async move {
+            loop {
+                notify.notified().await;
+                let items = {
+                    let mut q = meta_queue.lock().unwrap();
+                    q.drain(..).collect::<Vec<String>>()
+                };
+                Python::with_gil(|py| {
+                    let loads = PyModule::import(py, "json").unwrap().getattr("loads").unwrap();
+                    let loop_ref = event_loop.as_ref(py);
+                    let cb_ref = cb_handle.as_ref(py);
+                    let create_task = loop_ref.getattr("create_task").unwrap();
+                    let call_soon = loop_ref.getattr("call_soon_threadsafe").unwrap();
+                    if items.is_empty() {
+                        match cb_ref.call1((py.None(),)) {
+                            Ok(coro) => {
+                                let _ = call_soon.call1((create_task.clone(), coro));
+                            }
+                            Err(e) => e.print(py),
+                        }
+                    } else {
+                        for m in items {
+                            match loads.call1((m,))
+                                .and_then(|obj| cb_ref.call1((obj,))) {
+                                Ok(coro) => {
+                                    let _ = call_soon.call1((create_task.clone(), coro));
+                                }
+                                Err(e) => e.print(py),
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        Ok(())
+    }
+
+    fn wait_update<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+        let notify = self.notify.clone();
+        pyo3_asyncio::tokio::future_into_py(py, async move {
+            notify.notified().await;
+            Ok(())
+        })
     }
 
     fn process_meta(&self, py: Python<'_>) -> PyResult<()> {
@@ -251,6 +307,7 @@ fn start(
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
+    let notify = Arc::new(Notify::new());
     let mut named_map: HashMap<String, Shared> = HashMap::new();
     let subscription: Option<Vec<Mapping>> = if let Some(v) = maps {
         let mut out = Vec::new();
@@ -296,7 +353,8 @@ fn start(
         });
         let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
+        let notify_clone = notify.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub, notify_clone));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -313,6 +371,7 @@ fn start(
         pending_meta,
         callback: RefCell::new(None),
         named: named_arc,
+        notify,
     })
 }
 

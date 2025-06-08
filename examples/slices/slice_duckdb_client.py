@@ -1,21 +1,26 @@
 import argparse
-import time
+import asyncio
 import memblast
 import duckdb
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--server', default='0.0.0.0:7020')
-parser.add_argument('--tickers', default='2,50,75')
-parser.add_argument('--window', type=int, default=5)
+parser.add_argument("--server", default="0.0.0.0:7020")
+parser.add_argument("--tickers", default="2,50,75")
+parser.add_argument("--window", type=int, default=5)
 args = parser.parse_args()
 
-tickers = [int(t) for t in args.tickers.split(',') if t]
+tickers = [int(t) for t in args.tickers.split(",") if t]
 
 maps = []
 for i, t in enumerate(tickers):
     maps.append(([t, 0], [1, args.window], [i, 0], None))
 
-node = memblast.start('slice_duckdb_client', server=args.server, shape=[len(tickers), args.window], maps=maps)
+node = memblast.start(
+    "slice_duckdb_client",
+    server=args.server,
+    shape=[len(tickers), args.window],
+    maps=maps,
+)
 
 con = duckdb.connect()
 
@@ -23,13 +28,23 @@ con = duckdb.connect()
 # so DuckDB will always see the latest data without re-registering.
 arr = node.ndarray()
 arr = arr.reshape(len(tickers), args.window)
-con.register('data', arr)
+con.register("data", arr)
 
-while True:
+
+async def handle_update(meta):
     with node.read() as arr:
         arr = arr.reshape(len(tickers), args.window)
         print(arr.shape)
-        result = con.execute('SELECT AVG(column0), AVG(column1), AVG(column2) FROM data').fetchall()[0]
+        result = con.execute(
+            "SELECT AVG(column0), AVG(column1), AVG(column2) FROM data"
+        ).fetchall()[0]
         print("\033[H\033[J", end="")
         print(result)
-    time.sleep(1)
+
+
+async def main():
+    node.on_update_async(handle_update)
+    await asyncio.Event().wait()
+
+
+asyncio.run(main())

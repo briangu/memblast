@@ -1,6 +1,8 @@
 # Ticker Examples
 
-These scripts simulate streaming stock price data. Start the server and then run one of the clients.
+These scripts simulate streaming stock price data. Each program uses the
+`on_update_async` callback rather than polling. **Register the callback from an
+async function** then start the server and run one of the clients.
 
 ## Files
 
