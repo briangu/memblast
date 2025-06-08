@@ -51,6 +51,10 @@ Connect with the ticker client:
 python examples/tickers/ticker_client.py --server 0.0.0.0:7011
 ```
 
+The `examples/life` directory runs a 256×256 Conway game of life. Start the server
+with `python examples/life/life_server.py` and connect using
+`python examples/life/life_client.py`. Pass `--region` to the client to view a
+sub-region of the world.
 ## Running the tests
 
 Ensure your virtual environment is active and the module is built as described
@@ -58,3 +62,4 @@ above, then run:
 ```bash
 python -m pytest
 ```
+
