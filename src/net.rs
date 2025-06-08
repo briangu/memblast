@@ -3,23 +3,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{self, Duration};
 use std::collections::HashMap;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::fs::File;
+
+use serde::{Serialize, Deserialize};
 
 use crate::memory::Shared;
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
     pub start: u32,
     pub len: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePacket {
     pub updates: Vec<Update>,
     pub meta: Option<String>,
+    pub version: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -41,10 +45,24 @@ pub struct Subscription {
     pub maps: Vec<Mapping>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct LogUpdate {
+    pub start: u32,
+    pub values: Vec<f64>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LogRecord {
+    pub version: usize,
+    pub updates: Vec<LogUpdate>,
+    pub meta: Option<String>,
+}
 
 
-fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u8> {
+
+fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>, version: usize) -> Vec<u8> {
     let mut buf = Vec::new();
+    buf.extend_from_slice(&(version as u64).to_le_bytes());
     buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
     for u in updates {
         buf.extend_from_slice(&(u.shape.len() as u32).to_le_bytes());
@@ -240,7 +258,13 @@ async fn read_values(sock: &mut TcpStream, len: usize) -> Result<Option<Vec<f64>
     Ok(Some(vals))
 }
 
-async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>, usize, Vec<f64>, Option<String>)>, Option<String>)>> {
+async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(usize, Vec<(Vec<usize>, usize, Vec<f64>, Option<String>)>, Option<String>)>> {
+    let mut vbuf = [0u8; 8];
+    if !read_exact_checked(sock, &mut vbuf).await? {
+        return Ok(None);
+    }
+    let version = u64::from_le_bytes(vbuf) as usize;
+
     let mut len_buf = [0u8; 4];
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
@@ -279,7 +303,7 @@ async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>
         None
     };
 
-    Ok(Some((updates, meta)))
+    Ok(Some((version, updates, meta)))
 }
 
 fn apply_update(state: &Shared, start_idx: usize, vals: &[f64], len: usize) -> Result<()> {
@@ -291,6 +315,24 @@ fn apply_update(state: &Shared, start_idx: usize, vals: &[f64], len: usize) -> R
         }
     }
     state.end_write()
+}
+
+fn log_packet(file: &Arc<Mutex<File>>, packet: &UpdatePacket, state: &Shared) -> Result<()> {
+    let len: usize = state.shape().iter().product();
+    let mut record = LogRecord { version: packet.version, updates: Vec::new(), meta: packet.meta.clone() };
+    for u in &packet.updates {
+        let mut vals = Vec::with_capacity(u.len as usize);
+        for i in 0..u.len as usize {
+            if (u.start as usize + i) < len {
+                vals.push(state.get(u.start as usize + i));
+            }
+        }
+        record.updates.push(LogUpdate { start: u.start, values: vals });
+    }
+    let line = serde_json::to_string(&record)?;
+    let mut f = file.lock().unwrap();
+    writeln!(f, "{}", line)?;
+    Ok(())
 }
 
 fn strides(shape: &[u32]) -> Vec<usize> {
@@ -431,7 +473,7 @@ pub async fn handle_peer(
             Some(v) => v,
             None => break,
         };
-        let (updates, metadata) = packet;
+        let (_version, updates, metadata) = packet;
         for (shape, start_idx, vals, name) in updates {
             if shape == local_shape && name.is_none() {
                 apply_update(&state, start_idx, &vals, len)?;
@@ -461,6 +503,7 @@ pub async fn serve(
     rx: async_channel::Receiver<UpdatePacket>,
     state: Shared,
     pending_meta: Arc<Mutex<Option<String>>>,
+    log: Option<Arc<Mutex<File>>>,
 ) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
@@ -475,7 +518,8 @@ pub async fn serve(
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
                     let meta = pending_meta.lock().unwrap().clone();
-                    let data = filtered_to_bytes(&filtered, &meta);
+                    let version = state.seq.load(std::sync::atomic::Ordering::Acquire);
+                    let data = filtered_to_bytes(&filtered, &meta, version);
                     if sock.write_all(&data).await.is_ok() {
                         conns.push((sock, sub));
                     }
@@ -483,6 +527,9 @@ pub async fn serve(
             }
             res = rx.recv() => {
                 let u = match res { Ok(v) => v, Err(_) => break };
+                if let Some(ref lg) = log {
+                    let _ = log_packet(lg, &u, &state);
+                }
                 let mut alive = Vec::new();
                 let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                 for (mut s, sub) in conns {
@@ -491,7 +538,7 @@ pub async fn serve(
                         alive.push((s, sub));
                         continue;
                     }
-                    let data = filtered_to_bytes(&filtered, &u.meta);
+                    let data = filtered_to_bytes(&filtered, &u.meta, u.version);
                     match s.write_all(&data).await {
                         Ok(_) => alive.push((s, sub)),
                         Err(e) => println!("send failed: {}", e),
