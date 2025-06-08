@@ -1,5 +1,5 @@
 import argparse
-import time
+import asyncio
 import memblast
 import duckdb
 import numpy as np
@@ -21,12 +21,17 @@ con.register('data', arr)
 
 query = 'SELECT ' + ', '.join(f'AVG(column{i})' for i in range(len(tickers))) + ' FROM data'
 
-while True:
+
+async def handle_update(meta):
     print("\033[H\033[J", end="")
     with node.read() as arr:
         arr = arr.reshape(len(tickers), window)
         means = con.execute(query).fetchall()[0]
-    for i, (t, m) in enumerate(zip(tickers, means)):
-        print(f'{t}: data: {arr[i]} mean: {m:.2f}')
-    sys.stdout.flush()
-    time.sleep(1)
+        for i, (t, m) in enumerate(zip(tickers, means)):
+            print(f'{t}: data: {arr[i]} mean: {m:.2f}')
+        sys.stdout.flush()
+
+
+node.on_update_async(handle_update)
+
+asyncio.get_event_loop().run_forever()

@@ -1,5 +1,5 @@
 import argparse
-import time
+import asyncio
 import numpy as np
 import memblast
 import sys
@@ -15,13 +15,8 @@ window = args.window
 node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window])
 
 
-def handle_update(meta):
+async def handle_update(meta):
     print('metadata', meta)
-
-
-node.on_update(handle_update)
-
-while True:
     with node.read() as arr:
         data = np.array(arr).reshape(len(tickers), window)
         means = data.mean(axis=1)
@@ -29,5 +24,9 @@ while True:
         for t, m in zip(tickers, means):
             print(f'{t}: {m:.2f}')
         sys.stdout.flush()
-    time.sleep(1)
+
+
+node.on_update_async(handle_update)
+
+asyncio.get_event_loop().run_forever()
 

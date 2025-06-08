@@ -1,5 +1,5 @@
 import argparse
-import time
+import asyncio
 import memblast
 import sys
 
@@ -17,11 +17,16 @@ for i, t in enumerate(tickers):
 
 node = memblast.start('slice_client', server=args.server, shape=[len(tickers), args.window], maps=maps)
 
-while True:
+
+async def handle_update(meta):
     with node.read() as arr:
         arr = arr.reshape(len(tickers), args.window)
         print("\033[H\033[J", end="")
         for t, row in zip(tickers, arr):
             print(f'{t}: {row}')
         sys.stdout.flush()
-    time.sleep(1)
+
+
+node.on_update_async(handle_update)
+
+asyncio.get_event_loop().run_forever()

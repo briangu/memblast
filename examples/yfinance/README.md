@@ -2,7 +2,8 @@
 
 This folder demonstrates streaming live stock prices from Yahoo Finance into a
 [memblast](../..) shared memory buffer. A DuckDB client can then query the data
-using SQL. The design mirrors the approach in the article ["A Real Time Stock Market Feed"](https://www.defconq.tech/docs/tutorials/realTimeStocks?trk=feed_main-feed-card_feed-article-content) which implements a similar feed with KDB/Q.
+using SQL. Scripts use the `on_update_async` callback rather than polling. The
+design mirrors the approach in the article ["A Real Time Stock Market Feed"](https://www.defconq.tech/docs/tutorials/realTimeStocks?trk=feed_main-feed-card_feed-article-content) which implements a similar feed with KDB/Q.
 
 ## Files
 

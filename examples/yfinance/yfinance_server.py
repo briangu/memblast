@@ -1,5 +1,5 @@
 import argparse
-import time
+import asyncio
 import memblast
 import numpy as np
 import yfinance as yf
@@ -26,13 +26,17 @@ window = args.window
 node = memblast.start('yfinance_server', listen=args.listen, shape=[len(tickers), window])
 
 index = 0
-while True:
-    try:
-        data = yf.download(' '.join(tickers), period='1d', interval='1m', progress=False, group_by='ticker')
-    except Exception as e:
-        print('download failed', e)
-        time.sleep(args.interval)
-        continue
+
+
+async def main():
+    global index
+    while True:
+        try:
+            data = yf.download(' '.join(tickers), period='1d', interval='1m', progress=False, group_by='ticker')
+        except Exception as e:
+            print('download failed', e)
+            await asyncio.sleep(args.interval)
+            continue
 
     prices = []
     if len(tickers) == 1:
@@ -54,5 +58,8 @@ while True:
             print(t, row)
         sys.stdout.flush()
 
-    index += 1
-    time.sleep(args.interval)
+        index += 1
+        await asyncio.sleep(args.interval)
+
+
+asyncio.run(main())

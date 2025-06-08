@@ -1,6 +1,6 @@
 
 import argparse
-import time
+import asyncio
 import numpy as np
 import memblast
 import sys
@@ -17,19 +17,8 @@ window = args.window
 node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window])
 
 
-def handle_update(meta):
+async def handle_update(meta):
     print('metadata', meta)
-
-node.on_update(handle_update)
-
-con = duckdb.connect()
-# Register the numpy array ONCE. This is a live view into the shared memory,
-# so DuckDB will always see the latest data without re-registering.
-arr = node.ndarray()
-arr = arr.reshape([3,window])
-con.register('data', arr)
-
-while True:
     with node.read() as arr:
         data = np.array(arr).reshape(len(tickers), window)
         means = con.execute('SELECT AVG(column0), AVG(column1), AVG(column2) FROM data').fetchall()[0]
@@ -37,5 +26,17 @@ while True:
         for t, m in zip(tickers, means):
             print(f'{t}: {m:.2f}')
         sys.stdout.flush()
-    time.sleep(1)
+
+# Database connection must be created before updates trigger
+con = duckdb.connect()
+# Register the numpy array ONCE. This is a live view into the shared memory,
+# so DuckDB will always see the latest data without re-registering.
+arr = node.ndarray()
+arr = arr.reshape([3,window])
+con.register('data', arr)
+
+node.on_update_async(handle_update)
+
+
+asyncio.get_event_loop().run_forever()
 

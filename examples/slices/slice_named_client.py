@@ -1,5 +1,5 @@
 import argparse
-import time
+import asyncio
 import memblast
 import sys
 import numpy as np
@@ -16,7 +16,8 @@ maps = [([t, 0], [1, args.window], None, f'ticker_{t}') for t in tickers]
 
 node = memblast.start('named_client', server=args.server, shape=[1], maps=maps)
 
-while True:
+
+async def handle_update(meta):
     with node.read():
         print("\033[H\033[J", end="")
         for t in tickers:
@@ -25,4 +26,8 @@ while True:
                 data = np.array(arr).reshape(1, args.window)
                 print(f'{t}: {data[0]}')
         sys.stdout.flush()
-    time.sleep(1)
+
+
+node.on_update_async(handle_update)
+
+asyncio.get_event_loop().run_forever()

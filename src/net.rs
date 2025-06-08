@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Notify;
 
 use crate::memory::Shared;
 
@@ -419,6 +420,7 @@ pub async fn handle_peer(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    notify: Arc<Notify>,
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
@@ -451,6 +453,7 @@ pub async fn handle_peer(
             let mut q = meta.lock().unwrap();
             q.push(m);
         }
+        notify.notify_waiters();
     }
     println!("peer {:?} disconnected", addr);
     Ok(())
@@ -510,6 +513,7 @@ pub async fn client(
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
     sub: Subscription,
+    notify: Arc<Notify>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
     loop {
@@ -521,7 +525,7 @@ pub async fn client(
                 if sock.write_all(&data).await.is_err() {
                     continue;
                 }
-                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone()).await;
+                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone(), notify.clone()).await;
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }

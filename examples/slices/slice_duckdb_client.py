@@ -1,5 +1,5 @@
 import argparse
-import time
+import asyncio
 import memblast
 import duckdb
 
@@ -25,11 +25,16 @@ arr = node.ndarray()
 arr = arr.reshape(len(tickers), args.window)
 con.register('data', arr)
 
-while True:
+
+async def handle_update(meta):
     with node.read() as arr:
         arr = arr.reshape(len(tickers), args.window)
         print(arr.shape)
         result = con.execute('SELECT AVG(column0), AVG(column1), AVG(column2) FROM data').fetchall()[0]
         print("\033[H\033[J", end="")
         print(result)
-    time.sleep(1)
+
+
+node.on_update_async(handle_update)
+
+asyncio.get_event_loop().run_forever()

@@ -8,11 +8,13 @@ use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3_asyncio;
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
+use tokio::sync::Notify;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
 use libc::{PROT_READ};
@@ -31,6 +33,7 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 #[pymethods]
@@ -112,6 +115,56 @@ impl Node {
 
     fn on_update(&self, cb: PyObject) {
         *self.callback.borrow_mut() = Some(cb);
+    }
+
+    fn on_update_async(&self, py: Python<'_>, cb: PyObject) -> PyResult<()> {
+        let notify = self.notify.clone();
+        let meta_queue = self.meta_queue.clone();
+        let handle: Py<PyAny> = cb.into_py(py);
+        RUNTIME.spawn(async move {
+            loop {
+                notify.notified().await;
+                let items = {
+                    let mut q = meta_queue.lock().unwrap();
+                    q.drain(..).collect::<Vec<String>>()
+                };
+                let coros = Python::with_gil(|py| -> PyResult<Vec<_>> {
+                    let loads = PyModule::import(py, "json")?.getattr("loads")?;
+                    let cb = handle.as_ref(py);
+                    let mut futs = Vec::new();
+                    if items.is_empty() {
+                        let obj = cb.call1((py.None(),))?;
+                        futs.push(pyo3_asyncio::tokio::into_future(obj)?);
+                    } else {
+                        for m in items {
+                            let obj = loads.call1((m,))?;
+                            let awaitable = cb.call1((obj,))?;
+                            futs.push(pyo3_asyncio::tokio::into_future(awaitable)?);
+                        }
+                    }
+                    Ok(futs)
+                });
+                match coros {
+                    Ok(futs) => {
+                        for mut fut in futs {
+                            if let Err(e) = fut.await {
+                                eprintln!("on_update_async error: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("on_update_async error: {}", e),
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn wait_update<'py>(&self, py: Python<'py>) -> PyResult<&'py PyAny> {
+        let notify = self.notify.clone();
+        pyo3_asyncio::tokio::future_into_py(py, async move {
+            notify.notified().await;
+            Ok(())
+        })
     }
 
     fn process_meta(&self, py: Python<'_>) -> PyResult<()> {
@@ -249,6 +302,7 @@ fn start(
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
+    let notify = Arc::new(Notify::new());
     let mut named_map: HashMap<String, Shared> = HashMap::new();
     let subscription: Option<Vec<Mapping>> = if let Some(v) = maps {
         let mut out = Vec::new();
@@ -294,7 +348,8 @@ fn start(
         });
         let sub = Subscription { client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
+        let notify_clone = notify.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub, notify_clone));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -310,6 +365,7 @@ fn start(
         pending_meta,
         callback: RefCell::new(None),
         named: named_arc,
+        notify,
     })
 }
 
