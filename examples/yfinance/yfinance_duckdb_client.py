@@ -13,20 +13,13 @@ args = parser.parse_args()
 
 tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]
 window = args.window
-node = memblast.start(
-    "yfinance_duck_client", server=args.server, shape=[len(tickers), window]
-)
 
 con = duckdb.connect()
-arr = node.ndarray().reshape(len(tickers), window)
-con.register("data", arr)
-
 query = (
     "SELECT " + ", ".join(f"AVG(column{i})" for i in range(len(tickers))) + " FROM data"
 )
 
-
-async def handle_update(meta):
+async def handle_update(node, meta):
     print("\033[H\033[J", end="")
     with node.read() as arr:
         arr = arr.reshape(len(tickers), window)
@@ -35,10 +28,15 @@ async def handle_update(meta):
             print(f"{t}: data: {arr[i]} mean: {m:.2f}")
         sys.stdout.flush()
 
-
-async def main():
-    node.on_update_async(handle_update)
+async def main(node):
+    arr = node.ndarray().reshape(len(tickers), window)
+    con.register("data", arr)
     await asyncio.Event().wait()
 
-
-asyncio.run(main())
+memblast.start(
+    "yfinance_duck_client",
+    server=args.server,
+    shape=[len(tickers), window],
+    main=main,
+    on_update=handle_update,
+)

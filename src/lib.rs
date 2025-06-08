@@ -121,6 +121,7 @@ impl Node {
         let notify = self.notify.clone();
         let meta_queue = self.meta_queue.clone();
         let cb_handle: Py<PyAny> = cb.into_py(py);
+        let node_obj: Py<Node> = unsafe { Py::from_borrowed_ptr(py, self as *const _ as *mut pyo3::ffi::PyObject) };
         let event_loop = py
             .import("asyncio")?
             .call_method0("get_running_loop")?
@@ -139,7 +140,7 @@ impl Node {
                     let create_task = loop_ref.getattr("create_task").unwrap();
                     let call_soon = loop_ref.getattr("call_soon_threadsafe").unwrap();
                     if items.is_empty() {
-                        match cb_ref.call1((py.None(),)) {
+                        match cb_ref.call1((node_obj.clone_ref(py), py.None())) {
                             Ok(coro) => {
                                 let _ = call_soon.call1((create_task.clone(), coro));
                             }
@@ -148,7 +149,7 @@ impl Node {
                     } else {
                         for m in items {
                             match loads.call1((m,))
-                                .and_then(|obj| cb_ref.call1((obj,))) {
+                                .and_then(|obj| cb_ref.call1((node_obj.clone_ref(py), obj))) {
                                 Ok(coro) => {
                                     let _ = call_soon.call1((create_task.clone(), coro));
                                 }
@@ -289,15 +290,17 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, main=None, on_update=None))]
 fn start(
-    _py: Python<'_>,
+    py: Python<'_>,
     name: &str,
     listen: Option<&str>,
     server: Option<&str>,
     shape: Option<Vec<usize>>,
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
-) -> PyResult<Node> {
+    main: Option<PyObject>,
+    on_update: Option<PyObject>,
+) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -358,7 +361,7 @@ fn start(
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     println!("node {} running with listen={:?} server={:?} shape {:?}", name, listen, server, shape);
-    Ok(Node {
+    let node = Py::new(py, Node {
         state,
         tx,
         shape,
@@ -369,7 +372,27 @@ fn start(
         callback: RefCell::new(None),
         named: named_arc,
         notify,
-    })
+    })?;
+
+    if let Some(cb) = on_update {
+        let n_ref = node.as_ref(py).borrow();
+        if main.is_some() {
+            n_ref.on_update_async(py, cb)?;
+        } else {
+            n_ref.on_update(cb);
+        }
+    }
+
+    if let Some(main_fn) = main {
+        let fut = {
+            let node_clone = node.clone();
+            let coro = main_fn.call1(py, (node_clone.clone_ref(py),))?;
+            pyo3_asyncio::tokio::into_future(coro.into_ref(py))?
+        };
+        RUNTIME.block_on(fut)?;
+    }
+
+    Ok(node)
 }
 
 #[pymodule]

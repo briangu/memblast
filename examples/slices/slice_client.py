@@ -15,12 +15,7 @@ maps = []
 for i, t in enumerate(tickers):
     maps.append(([t, 0], [1, args.window], [i, 0], None))
 
-node = memblast.start(
-    "slice_client", server=args.server, shape=[len(tickers), args.window], maps=maps
-)
-
-
-async def handle_update(meta):
+async def handle_update(node, meta):
     with node.read() as arr:
         arr = arr.reshape(len(tickers), args.window)
         print("\033[H\033[J", end="")
@@ -29,9 +24,15 @@ async def handle_update(meta):
         sys.stdout.flush()
 
 
-async def main():
-    node.on_update_async(handle_update)
+async def main(node):
     await asyncio.Event().wait()
 
 
-asyncio.run(main())
+memblast.start(
+    "slice_client",
+    server=args.server,
+    shape=[len(tickers), args.window],
+    maps=maps,
+    main=main,
+    on_update=handle_update,
+)

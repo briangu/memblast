@@ -15,23 +15,9 @@ maps = []
 for i, t in enumerate(tickers):
     maps.append(([t, 0], [1, args.window], [i, 0], None))
 
-node = memblast.start(
-    "slice_duckdb_client",
-    server=args.server,
-    shape=[len(tickers), args.window],
-    maps=maps,
-)
-
 con = duckdb.connect()
 
-# Register the numpy array ONCE. This is a live view into the shared memory,
-# so DuckDB will always see the latest data without re-registering.
-arr = node.ndarray()
-arr = arr.reshape(len(tickers), args.window)
-con.register("data", arr)
-
-
-async def handle_update(meta):
+async def handle_update(node, meta):
     with node.read() as arr:
         arr = arr.reshape(len(tickers), args.window)
         print(arr.shape)
@@ -41,10 +27,17 @@ async def handle_update(meta):
         print("\033[H\033[J", end="")
         print(result)
 
-
-async def main():
-    node.on_update_async(handle_update)
+# Node will be provided to main; create array after start.
+async def main(node):
+    arr = node.ndarray().reshape(len(tickers), args.window)
+    con.register("data", arr)
     await asyncio.Event().wait()
 
-
-asyncio.run(main())
+memblast.start(
+    "slice_duckdb_client",
+    server=args.server,
+    shape=[len(tickers), args.window],
+    maps=maps,
+    main=main,
+    on_update=handle_update,
+)

@@ -14,10 +14,7 @@ tickers = [int(t) for t in args.tickers.split(",") if t]
 
 maps = [([t, 0], [1, args.window], None, f"ticker_{t}") for t in tickers]
 
-node = memblast.start("named_client", server=args.server, shape=[1], maps=maps)
-
-
-async def handle_update(meta):
+async def handle_update(node, meta):
     with node.read():
         print("\033[H\033[J", end="")
         for t in tickers:
@@ -28,9 +25,15 @@ async def handle_update(meta):
         sys.stdout.flush()
 
 
-async def main():
-    node.on_update_async(handle_update)
+async def main(node):
     await asyncio.Event().wait()
 
 
-asyncio.run(main())
+memblast.start(
+    "named_client",
+    server=args.server,
+    shape=[1],
+    maps=maps,
+    main=main,
+    on_update=handle_update,
+)

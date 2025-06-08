@@ -12,10 +12,9 @@ args = parser.parse_args()
 
 tickers = args.tickers.split(",")
 window = args.window
-node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window])
 
 
-async def handle_update(meta):
+async def handle_update(node, meta):
     print("metadata", meta)
     with node.read() as arr:
         data = np.array(arr).reshape(len(tickers), window)
@@ -26,9 +25,14 @@ async def handle_update(meta):
         sys.stdout.flush()
 
 
-async def main():
-    node.on_update_async(handle_update)
+async def main(node):
     await asyncio.Event().wait()
 
 
-asyncio.run(main())
+memblast.start(
+    "ticker_client",
+    server=args.server,
+    shape=[len(tickers), window],
+    main=main,
+    on_update=handle_update,
+)

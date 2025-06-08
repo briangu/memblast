@@ -1,9 +1,9 @@
 # Example Programs
 
 This directory contains small programs demonstrating how to use **memblast**.
-All examples are event driven and use the `on_update_async` callback rather than
-polling for changes. **Register the callback inside an async function so the
-event loop is running.**
+All examples are event driven. Each script passes an async `main` coroutine and
+an `on_update` callback to `memblast.start`, which drives the event loop for you
+and invokes the handler whenever updates arrive.
 Make sure the package is built with:
 
 ```bash
