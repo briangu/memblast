@@ -18,3 +18,5 @@ tomli==2.2.1
 tqdm==4.67.1
 typing-inspection==0.4.1
 typing_extensions==4.13.2
+pandas==2.2.2
+yfinance==0.2.38
