@@ -28,3 +28,8 @@ Code under [slices/](slices/) shows how clients can map slices of a large array.
 
 The [tickers/](tickers/) folder streams fake stock ticker data. See `tickers/README.md` for the full description.
 
+
+## Game of Life example
+
+The [life/](life/) folder contains a 256×256 Conway game of life. Run the server and
+use the client to view the whole grid or a sub-region with the `--region` option.
