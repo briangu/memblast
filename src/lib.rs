@@ -120,7 +120,11 @@ impl Node {
     fn on_update_async(&self, py: Python<'_>, cb: PyObject) -> PyResult<()> {
         let notify = self.notify.clone();
         let meta_queue = self.meta_queue.clone();
-        let handle: Py<PyAny> = cb.into_py(py);
+        let cb_handle: Py<PyAny> = cb.into_py(py);
+        let event_loop = py
+            .import("asyncio")?
+            .call_method0("get_running_loop")?
+            .into_py(py);
         RUNTIME.spawn(async move {
             loop {
                 notify.notified().await;
@@ -128,32 +132,31 @@ impl Node {
                     let mut q = meta_queue.lock().unwrap();
                     q.drain(..).collect::<Vec<String>>()
                 };
-                let coros = Python::with_gil(|py| -> PyResult<Vec<_>> {
-                    let loads = PyModule::import(py, "json")?.getattr("loads")?;
-                    let cb = handle.as_ref(py);
-                    let mut futs = Vec::new();
+                Python::with_gil(|py| {
+                    let loads = PyModule::import(py, "json").unwrap().getattr("loads").unwrap();
+                    let loop_ref = event_loop.as_ref(py);
+                    let cb_ref = cb_handle.as_ref(py);
+                    let create_task = loop_ref.getattr("create_task").unwrap();
+                    let call_soon = loop_ref.getattr("call_soon_threadsafe").unwrap();
                     if items.is_empty() {
-                        let obj = cb.call1((py.None(),))?;
-                        futs.push(pyo3_asyncio::tokio::into_future(obj)?);
+                        match cb_ref.call1((py.None(),)) {
+                            Ok(coro) => {
+                                let _ = call_soon.call1((create_task.clone(), coro));
+                            }
+                            Err(e) => e.print(py),
+                        }
                     } else {
                         for m in items {
-                            let obj = loads.call1((m,))?;
-                            let awaitable = cb.call1((obj,))?;
-                            futs.push(pyo3_asyncio::tokio::into_future(awaitable)?);
-                        }
-                    }
-                    Ok(futs)
-                });
-                match coros {
-                    Ok(futs) => {
-                        for mut fut in futs {
-                            if let Err(e) = fut.await {
-                                eprintln!("on_update_async error: {}", e);
+                            match loads.call1((m,))
+                                .and_then(|obj| cb_ref.call1((obj,))) {
+                                Ok(coro) => {
+                                    let _ = call_soon.call1((create_task.clone(), coro));
+                                }
+                                Err(e) => e.print(py),
                             }
                         }
                     }
-                    Err(e) => eprintln!("on_update_async error: {}", e),
-                }
+                });
             }
         });
         Ok(())
