@@ -1,5 +1,6 @@
 mod memory;
 mod net;
+mod rdma;
 
 use memory::{MmapBuf, Shared};
 use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
