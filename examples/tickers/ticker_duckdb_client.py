@@ -20,7 +20,6 @@ node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), 
 def handle_update(meta):
     print('metadata', meta)
 
-
 node.on_update(handle_update)
 
 con = duckdb.connect()

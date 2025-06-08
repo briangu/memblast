@@ -37,6 +37,10 @@ Additional example categories live under `examples/slices` and
 `examples/tickers`. The ticker examples stream random price updates for a set of
 stock tickers and the clients compute rolling statistics.
 
+There is also a Yahoo Finance example under `examples/yfinance` that pulls
+real data using the `yfinance` library and demonstrates querying the live
+buffer with DuckDB. See `examples/yfinance/README.md` for details.
+
 Run the ticker server:
 ```bash
 python examples/tickers/ticker_server.py --listen 0.0.0.0:7011

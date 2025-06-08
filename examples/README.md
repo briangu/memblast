@@ -28,3 +28,9 @@ Code under [slices/](slices/) shows how clients can map slices of a large array.
 
 The [tickers/](tickers/) folder streams fake stock ticker data. See `tickers/README.md` for the full description.
 
+## Yahoo Finance example
+
+The [yfinance/](yfinance/) folder pulls live data from Yahoo Finance and
+registers the shared array with DuckDB. This mirrors the approach described in
+[this article](https://www.defconq.tech/docs/tutorials/realTimeStocks?trk=feed_main-feed-card_feed-article-content).
+
