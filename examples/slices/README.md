@@ -1,9 +1,8 @@
 # Slice Examples
 
 These programs demonstrate mapping portions of a large shared array to clients.
-A server maintains a `(tickers x window)` sliding window of random data.
-Each new value is appended to the end of the window while older values move up.
-Clients map slices of that buffer in different ways.
+A server maintains a `(tickers x window)` buffer of random data. Each client
+selects slices of that buffer in different ways.
 
 ## Files
 
