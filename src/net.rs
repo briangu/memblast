@@ -37,6 +37,7 @@ pub struct Mapping {
 
 #[derive(Debug, Clone)]
 pub struct Subscription {
+    pub name: String,
     pub client_shape: Vec<u32>,
     pub maps: Vec<Mapping>,
 }
@@ -76,6 +77,8 @@ fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u
 pub fn subscription_to_bytes(sub: &Subscription) -> Vec<u8> {
     let mut buf = Vec::new();
     buf.push(1u8); // message type 1 for subscription
+    buf.extend_from_slice(&(sub.name.len() as u32).to_le_bytes());
+    buf.extend_from_slice(sub.name.as_bytes());
     buf.extend_from_slice(&(sub.client_shape.len() as u32).to_le_bytes());
     for d in &sub.client_shape {
         buf.extend_from_slice(&d.to_le_bytes());
@@ -132,6 +135,12 @@ async fn read_subscription(sock: &mut TcpStream) -> Result<Option<Subscription>>
     }
 
     let mut len_buf = [0u8; 4];
+    if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
+    let name_len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; name_len];
+    if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
+    let name = String::from_utf8_lossy(&buf).to_string();
+
     if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
     let shape_len = u32::from_le_bytes(len_buf) as usize;
     let mut shape_bytes = vec![0u8; shape_len * 4];
@@ -192,7 +201,7 @@ async fn read_subscription(sock: &mut TcpStream) -> Result<Option<Subscription>>
         };
         maps.push(Mapping { server_start, shape: region_shape, target });
     }
-    Ok(Some(Subscription { client_shape: shape, maps }))
+    Ok(Some(Subscription { name, client_shape: shape, maps }))
 }
 
 async fn read_update_header(sock: &mut TcpStream) -> Result<Option<(Vec<usize>, usize, usize)>> {
@@ -469,8 +478,8 @@ pub async fn serve(
         tokio::select! {
             res = lst.accept() => {
                 let (mut sock, peer) = res?;
-                println!("accepted connection from {}", peer);
                 if let Some(sub) = read_subscription(&mut sock).await? {
+                    println!("accepted connection from {} named {}", peer, sub.name);
                     let snap = snapshot_update(&state);
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);

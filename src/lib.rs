@@ -24,6 +24,8 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 struct Node {
     state: Shared,
     tx: async_channel::Sender<UpdatePacket>,
+    #[pyo3(get)]
+    name: String,
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
@@ -292,7 +294,7 @@ fn start(
                 target: net::Target::Region(vec![0u32; shape.len()])
             }]
         });
-        let sub = Subscription { client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
+        let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
         RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
     }
@@ -303,6 +305,7 @@ fn start(
     Ok(Node {
         state,
         tx,
+        name: name.to_string(),
         shape,
         len,
         scratch: RefCell::new(vec![0.0; len]),
