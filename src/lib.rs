@@ -294,7 +294,7 @@ fn start(
                 target: net::Target::Region(vec![0u32; shape.len()])
             }]
         });
-        let sub = Subscription { client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
+        let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
         RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
     }
