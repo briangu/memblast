@@ -6,10 +6,11 @@ import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--server', default='0.0.0.0:7030')
-parser.add_argument('--region')
+parser.add_argument('--width', type=int, default=64)
+parser.add_argument('--region') # r0,c0,h,w (e.g. 0,0,10,10 for top left corner
 args = parser.parse_args()
 
-size = 256
+size = args.width
 
 if args.region:
     r0, c0, h, w = [int(x) for x in args.region.split(',')]

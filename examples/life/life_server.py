@@ -6,9 +6,10 @@ import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--listen', default='0.0.0.0:7030')
+parser.add_argument('--width', type=int, default=64)
 args = parser.parse_args()
 
-size = 256
+size = args.width
 node = memblast.start('life_server', listen=args.listen, shape=[size, size])
 
 world = np.random.randint(2, size=(size, size)).astype(float)
@@ -24,7 +25,7 @@ while True:
     with node.write() as arr:
         arr = arr.reshape(size, size)
         arr[:, :] = world
-    
+
     with node.read() as arr:
         arr = arr.reshape(size, size)
         print("\033[H\033[J", end="")
