@@ -235,15 +235,17 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update_async=None, event_loop=None))]
 fn start(
-    _py: Python<'_>,
+    py: Python<'_>,
     name: &str,
     listen: Option<&str>,
     server: Option<&str>,
     shape: Option<Vec<usize>>,
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
-) -> PyResult<Node> {
+    on_update_async: Option<PyObject>,
+    event_loop: Option<PyObject>,
+) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -302,18 +304,46 @@ fn start(
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     println!("node {} running with listen={:?} server={:?} shape {:?}", name, listen, server, shape);
-    Ok(Node {
+    let node = Py::new(py, Node {
         state,
         tx,
         name: name.to_string(),
         shape,
         len,
         scratch: RefCell::new(vec![0.0; len]),
-        meta_queue,
-        pending_meta,
+        meta_queue: meta_queue.clone(),
+        pending_meta: pending_meta.clone(),
         callback: RefCell::new(None),
-        named: named_arc,
-    })
+        named: named_arc.clone(),
+    })?;
+
+    if let (Some(cb), Some(loop_obj)) = (on_update_async, event_loop) {
+        let mq = meta_queue.clone();
+        let node_clone = node.clone();
+        std::thread::spawn(move || {
+            loop {
+                let metas = {
+                    let mut q = mq.lock().unwrap();
+                    if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) }
+                };
+                if let Some(items) = metas {
+                    Python::with_gil(|py| {
+                        let loads = py.import("json").unwrap().getattr("loads").unwrap();
+                        for m in items {
+                            let obj = loads.call1((m,)).unwrap();
+                            let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                            py.import("asyncio").unwrap()
+                                .call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py)))
+                                .unwrap();
+                        }
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+    }
+
+    Ok(node)
 }
 
 #[pymodule]
