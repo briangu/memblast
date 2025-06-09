@@ -23,7 +23,8 @@ args = parser.parse_args()
 
 tickers = load_tickers(args.tickers)
 window = args.window
-node = memblast.start('yfinance_server', listen=args.listen, shape=[len(tickers), window])
+loop = asyncio.get_event_loop()
+node = memblast.start('yfinance_server', listen=args.listen, shape=[len(tickers), window], event_loop=loop)
 
 index = 0
 
@@ -62,4 +63,5 @@ async def main():
         await asyncio.sleep(args.interval)
 
 
-asyncio.run(main())
+loop.create_task(main())
+loop.run_forever()

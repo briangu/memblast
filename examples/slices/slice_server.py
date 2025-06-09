@@ -10,7 +10,8 @@ parser.add_argument('--tickers', type=int, default=100)
 parser.add_argument('--window', type=int, default=5)
 args = parser.parse_args()
 
-node = memblast.start('slice_server', listen=args.listen, shape=[args.tickers, args.window])
+loop = asyncio.get_event_loop()
+node = memblast.start('slice_server', listen=args.listen, shape=[args.tickers, args.window], event_loop=loop)
 
 index = 0
 
@@ -32,4 +33,5 @@ async def main():
         await asyncio.sleep(1)
 
 
-asyncio.run(main())
+loop.create_task(main())
+loop.run_forever()

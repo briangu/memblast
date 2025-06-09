@@ -9,7 +9,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--listen', default='0.0.0.0:7010')
 args = parser.parse_args()
 
-node = memblast.start("a", listen=args.listen, shape=[10,10])
+loop = asyncio.get_event_loop()
+node = memblast.start("a", listen=args.listen, shape=[10,10], event_loop=loop)
 
 
 async def main():
@@ -28,4 +29,5 @@ async def main():
         await asyncio.sleep(1)
 
 
-asyncio.run(main())
+loop.create_task(main())
+loop.run_forever()

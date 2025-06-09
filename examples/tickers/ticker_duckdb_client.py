@@ -33,10 +33,13 @@ async def main(node):
     con.register("data", arr)
     await asyncio.Event().wait()
 
+loop = asyncio.get_event_loop()
 memblast.start(
     "ticker_client",
     server=args.server,
     shape=[len(tickers), window],
     main=main,
     on_update=handle_update,
+    event_loop=loop,
 )
+loop.run_forever()

@@ -19,4 +19,6 @@ async def main(node):
     await asyncio.Event().wait()
 
 
-memblast.start("b", server=args.server, shape=[10, 10], main=main, on_update=handle_update)
+loop = asyncio.get_event_loop()
+memblast.start("b", server=args.server, shape=[10, 10], main=main, on_update=handle_update, event_loop=loop)
+loop.run_forever()

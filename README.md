@@ -22,9 +22,9 @@ This project exposes a small Raft-backed shared memory buffer as a Python extens
 
 The repository contains a number of example programs under `examples/`. These
 scripts are event driven – each program passes an async `main` coroutine and an
-`on_update` callback to `memblast.start`. The library manages the event loop and
-invokes the callback whenever new data arrives. The basic example is a simple
-server and client pair.
+`on_update` callback to `memblast.start`. You may pass an existing asyncio event
+loop to `start`; otherwise a new loop is spawned in a background thread. The
+basic example is a simple server and client pair.
 
 Start a server in one terminal:
 ```bash
@@ -43,6 +43,10 @@ stock tickers and the clients compute rolling statistics.
 There is also a Yahoo Finance example under `examples/yfinance` that pulls
 real data using the `yfinance` library and demonstrates querying the live
 buffer with DuckDB. See `examples/yfinance/README.md` for details.
+
+For a web-based demo using websockets see `examples/flask_ws.py`, which
+launches a small Quart (async Flask) application that streams updates to the
+browser.
 
 Run the ticker server:
 ```bash

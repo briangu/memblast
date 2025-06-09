@@ -2,8 +2,9 @@
 
 This directory contains small programs demonstrating how to use **memblast**.
 All examples are event driven. Each script passes an async `main` coroutine and
-an `on_update` callback to `memblast.start`, which drives the event loop for you
-and invokes the handler whenever updates arrive.
+an `on_update` callback to `memblast.start`, which uses an asyncio event loop to
+invoke the handler whenever updates arrive. You can supply your own loop or let
+`start` spawn one for you.
 Make sure the package is built with:
 
 ```bash
@@ -37,4 +38,9 @@ The [tickers/](tickers/) folder streams fake stock ticker data. See `tickers/REA
 The [yfinance/](yfinance/) folder pulls live data from Yahoo Finance and
 registers the shared array with DuckDB. This mirrors the approach described in
 [this article](https://www.defconq.tech/docs/tutorials/realTimeStocks?trk=feed_main-feed-card_feed-article-content).
+
+## Websocket demo
+
+`flask_ws.py` starts a small Quart-based web server and streams updates to a
+browser over a WebSocket.
 

@@ -12,7 +12,8 @@ args = parser.parse_args()
 
 tickers = args.tickers.split(',')
 window = args.window
-node = memblast.start("ticker_server", listen=args.listen, shape=[len(tickers), window])
+loop = asyncio.get_event_loop()
+node = memblast.start("ticker_server", listen=args.listen, shape=[len(tickers), window], event_loop=loop)
 
 index = 0
 
@@ -35,4 +36,5 @@ async def main():
         index += 1
 
 
-asyncio.run(main())
+loop.create_task(main())
+loop.run_forever()

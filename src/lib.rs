@@ -34,6 +34,7 @@ struct Node {
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
     notify: Arc<tokio::sync::Notify>,
+    loop_obj: Option<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -117,15 +118,21 @@ impl Node {
         *self.callback.borrow_mut() = Some(cb);
     }
 
-    fn on_update_async(&self, py: Python<'_>, cb: PyObject) -> PyResult<()> {
+    fn on_update_async(&self, py: Python<'_>, cb: PyObject, loop_obj: Option<PyObject>) -> PyResult<()> {
         let notify = self.notify.clone();
         let meta_queue = self.meta_queue.clone();
         let cb_handle: Py<PyAny> = cb.into_py(py);
         let node_obj: Py<Node> = unsafe { Py::from_borrowed_ptr(py, self as *const _ as *mut pyo3::ffi::PyObject) };
-        let event_loop = py
-            .import("asyncio")?
-            .call_method0("get_running_loop")?
-            .into_py(py);
+        let event_loop = if let Some(l) = loop_obj {
+            l.into_py(py)
+        } else if let Some(l) = &self.loop_obj {
+            l.clone_ref(py)
+        } else {
+            py
+                .import("asyncio")?
+                .call_method0("get_running_loop")?
+                .into_py(py)
+        };
         RUNTIME.spawn(async move {
             loop {
                 notify.notified().await;
@@ -169,6 +176,11 @@ impl Node {
             notify.notified().await;
             Ok(())
         })
+    }
+
+    #[getter]
+    fn r#loop(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.loop_obj.as_ref().map(|l| l.clone_ref(py))
     }
 
     fn process_meta(&self, py: Python<'_>) -> PyResult<()> {
@@ -290,7 +302,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, main=None, on_update=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, main=None, on_update=None, event_loop=None))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -300,6 +312,7 @@ fn start(
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
     main: Option<PyObject>,
     on_update: Option<PyObject>,
+    event_loop: Option<PyObject>,
 ) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
@@ -361,6 +374,15 @@ fn start(
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     println!("node {} running with listen={:?} server={:?} shape {:?}", name, listen, server, shape);
+
+    let (loop_obj_opt, created_loop) = if let Some(l) = event_loop {
+        (Some(l.into_py(py)), false)
+    } else if main.is_some() || on_update.is_some() {
+        (Some(py.import("asyncio")?.call_method0("new_event_loop")?.into_py(py)), true)
+    } else {
+        (None, false)
+    };
+
     let node = Py::new(py, Node {
         state,
         tx,
@@ -372,24 +394,36 @@ fn start(
         callback: RefCell::new(None),
         named: named_arc,
         notify,
+        loop_obj: loop_obj_opt.clone(),
     })?;
 
     if let Some(cb) = on_update {
         let n_ref = node.as_ref(py).borrow();
         if main.is_some() {
-            n_ref.on_update_async(py, cb)?;
+            n_ref.on_update_async(py, cb, loop_obj_opt.clone())?;
         } else {
             n_ref.on_update(cb);
         }
     }
 
     if let Some(main_fn) = main {
-        let fut = {
+        if let Some(loop_obj) = &loop_obj_opt {
             let node_clone = node.clone();
             let coro = main_fn.call1(py, (node_clone.clone_ref(py),))?;
-            pyo3_asyncio::tokio::into_future(coro.into_ref(py))?
-        };
-        RUNTIME.block_on(fut)?;
+            let loop_ref = loop_obj.as_ref(py);
+            let create_task = loop_ref.getattr("create_task")?;
+            let call_soon = loop_ref.getattr("call_soon_threadsafe")?;
+            call_soon.call1((create_task, coro))?;
+        }
+    }
+
+    if created_loop {
+        let loop_clone = loop_obj_opt.as_ref().unwrap().clone();
+        std::thread::spawn(move || {
+            Python::with_gil(|py| {
+                let _ = loop_clone.as_ref(py).call_method0("run_forever");
+            });
+        });
     }
 
     Ok(node)
