@@ -13,17 +13,14 @@ args = parser.parse_args()
 
 tickers = args.tickers.split(',')
 window = args.window
-node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window])
-
-latest_idx = -1
-
-
 def handle_update(meta):
     global latest_idx
     latest_idx = meta.get('index', latest_idx)
 
 
-node.on_update(handle_update)
+node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window], on_update=handle_update)
+
+latest_idx = -1
 
 while True:
     with node.read() as arr:
