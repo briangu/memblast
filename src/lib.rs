@@ -2,7 +2,7 @@ mod memory;
 mod net;
 
 use memory::{MmapBuf, Shared};
-use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
+use crate::net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -17,6 +17,9 @@ use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
 use libc::{PROT_READ};
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader};
+use serde_json;
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 
@@ -33,6 +36,7 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
+    log: Option<Arc<Mutex<File>>>,
 }
 
 #[pymethods]
@@ -101,7 +105,9 @@ impl Node {
                 Update { start: s as u32, len: len as u32 }
             })
             .collect();
-        let packet = UpdatePacket { updates, meta };
+        let mut version = self.state.seq.load(std::sync::atomic::Ordering::Acquire);
+        if version % 2 == 1 { version += 1; }
+        let packet = UpdatePacket { updates, meta, version };
         let _ = self.tx.try_send(packet);
     }
 
@@ -144,6 +150,35 @@ impl Node {
         slf.state.read_snapshot(&mut scratch);
         let data = std::mem::take(&mut *scratch);
         Ok(ReadGuard { node: node_ref, arr: Some(data) })
+    }
+
+    fn sync_from_log(&self, path: &str, from_version: usize) -> PyResult<()> {
+        let file = File::open(path).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let reader = BufReader::new(file);
+        let len: usize = self.shape.iter().product();
+        for line in reader.lines() {
+            let line = line.map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let rec: net::LogRecord = serde_json::from_str(&line)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            if rec.version < from_version { continue; }
+            for upd in rec.updates {
+                let start = upd.start as usize;
+                let vals = upd.values;
+                self.state.start_write().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                let base = self.state.mm.mm.as_ptr() as *mut f64;
+                for (i, v) in (start..start + vals.len()).zip(vals.iter()) {
+                    if i < len {
+                        unsafe { *base.add(i) = *v; }
+                    }
+                }
+                self.state.end_write().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            }
+            if let Some(m) = rec.meta {
+                let mut q = self.meta_queue.lock().unwrap();
+                q.push(m);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -235,7 +270,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, log_path=None))]
 fn start(
     _py: Python<'_>,
     name: &str,
@@ -243,6 +278,7 @@ fn start(
     server: Option<&str>,
     shape: Option<Vec<usize>>,
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
+    log_path: Option<&str>,
 ) -> PyResult<Node> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
@@ -272,6 +308,11 @@ fn start(
         Some(out)
     } else { None };
     let named_arc = Arc::new(named_map);
+    let log_handle = if let Some(path) = log_path {
+        let file = OpenOptions::new().create(true).append(true).open(path)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Some(Arc::new(Mutex::new(file)))
+    } else { None };
 
     if let Some(addr) = listen {
         let listen_addr: SocketAddr = addr.parse()
@@ -279,7 +320,8 @@ fn start(
         let st_clone = state.clone();
         let rx_clone = rx.clone();
         let pm = pending_meta.clone();
-        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm));
+        let log_clone = log_handle.clone();
+        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm, log_clone));
     }
 
     if let Some(addr) = server {
@@ -313,6 +355,7 @@ fn start(
         pending_meta,
         callback: RefCell::new(None),
         named: named_arc,
+        log: log_handle,
     })
 }
 
