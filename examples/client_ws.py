@@ -46,24 +46,14 @@ async def main():
         on_update_async=handle_update,
         event_loop=asyncio.get_running_loop()
     )
-    app_task = asyncio.create_task(app.run_task(port=args.port))
 
-    # Wait for a shutdown signal
-    stop = asyncio.Future()
-    def shutdown():
-        if not stop.done():
-            stop.set_result(None)
+    stop = asyncio.Event()
+
     loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGINT, shutdown)
-    loop.add_signal_handler(signal.SIGTERM, shutdown)
-    await stop
+    loop.add_signal_handler(signal.SIGINT, stop.set)
+    loop.add_signal_handler(signal.SIGTERM, stop.set)
 
-    # Optionally, clean up
-    app_task.cancel()
-    try:
-        await app_task
-    except asyncio.CancelledError:
-        pass
+    await app.run_task(port=args.port, shutdown_trigger=stop.wait)
 
 if __name__ == '__main__':
     try:
