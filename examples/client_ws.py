@@ -15,8 +15,6 @@ clients = set()
 async def handle_update(node, meta):
     with node.read() as arr:
         data = str(arr.tolist())
-        print("\033[H\033[J", end="")
-        print(arr)
     for ws in list(clients):
         await ws.send(data)
 
@@ -40,23 +38,33 @@ async def index():
     </body></html>
     """
 
-async def main():
+async def main() -> None:
+    loop   = asyncio.get_running_loop()
+    stop   = asyncio.Event()
+
     memblast.start(
-        'web', server=args.server, shape=[10, 10],
-        on_update_async=handle_update,
-        event_loop=asyncio.get_running_loop()
+        "web", server=args.server, shape=[10, 10],
+        on_update_async=handle_update, event_loop=loop,
     )
 
-    stop = asyncio.Event()
+    def _arm_shutdown(sig: signal.Signals):
+        loop.create_task(_shutdown(sig))
 
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGINT, stop.set)
-    loop.add_signal_handler(signal.SIGTERM, stop.set)
+    async def _shutdown(sig):
+        print(f"\n💡 received {sig.name}, shutting down …")
+        stop.set()                        # 1) unblock Quart
+        await asyncio.gather(
+            *(ws.close(code=1001, reason="server shutdown") for ws in clients),
+            return_exceptions=True,
+        )
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, _arm_shutdown, sig)
 
     await app.run_task(port=args.port, shutdown_trigger=stop.wait)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Shutting down gracefully...")
+        print("\n💡 KeyboardInterrupt → shutdown request already handled.")
