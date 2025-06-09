@@ -249,13 +249,15 @@ async fn read_values(sock: &mut TcpStream, len: usize) -> Result<Option<Vec<f64>
     Ok(Some(vals))
 }
 
-async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>, usize, Vec<f64>, Option<String>)>, Option<String>)>> {
+async fn read_update_set<F>(sock: &mut TcpStream, mut f: F) -> Result<Option<Option<String>>>
+where
+    F: FnMut(Vec<usize>, usize, Vec<f64>, Option<String>) -> Result<()>,
+{
     let mut len_buf = [0u8; 4];
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
     }
     let count = u32::from_le_bytes(len_buf) as usize;
-    let mut updates = Vec::with_capacity(count);
     for _ in 0..count {
         let (shape, start_idx, val_len) = match read_update_header(sock).await? {
             Some(v) => v,
@@ -272,7 +274,7 @@ async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>
             if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
             Some(String::from_utf8_lossy(&buf).to_string())
         } else { None };
-        updates.push((shape, start_idx, vals, name));
+        f(shape, start_idx, vals, name)?;
     }
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
@@ -288,7 +290,7 @@ async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>
         None
     };
 
-    Ok(Some((updates, meta)))
+    Ok(Some(meta))
 }
 
 fn apply_update(state: &Shared, start_idx: usize, vals: &[f64], len: usize) -> Result<()> {
@@ -436,26 +438,25 @@ pub async fn handle_peer(
     let named_map = named.clone();
 
     loop {
-        let packet = match read_update_set(&mut sock).await? {
-            Some(v) => v,
-            None => break,
-        };
-        let (updates, metadata) = packet;
-        for (shape, start_idx, vals, name) in updates {
+        let metadata = match read_update_set(&mut sock, |shape, start_idx, vals, name| {
             if shape == local_shape && name.is_none() {
-                apply_update(&state, start_idx, &vals, len)?;
+                apply_update(&state, start_idx, &vals, len)
             } else if let Some(nm) = name {
                 if let Some(dst) = named_map.get(&nm) {
                     let l: usize = dst.shape().iter().product();
-                    apply_update(dst, start_idx, &vals, l)?;
+                    apply_update(dst, start_idx, &vals, l)
                 } else {
                     println!("unknown named slice {}", nm);
+                    Ok(())
                 }
             } else {
                 println!("shape mismatch: recv {:?} local {:?}", shape, local_shape);
-                continue;
+                Ok(())
             }
-        }
+        }).await? {
+            Some(v) => v,
+            None => break,
+        };
         if let Some(m) = metadata {
             let mut q = meta.lock().unwrap();
             q.push(m);
