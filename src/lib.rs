@@ -235,7 +235,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update_async=None, event_loop=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -243,6 +243,7 @@ fn start(
     server: Option<&str>,
     shape: Option<Vec<usize>>,
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
+    on_update: Option<PyObject>,
     on_update_async: Option<PyObject>,
     event_loop: Option<PyObject>,
 ) -> PyResult<Py<Node>> {
@@ -316,6 +317,10 @@ fn start(
         callback: RefCell::new(None),
         named: named_arc.clone(),
     })?;
+
+    if let Some(cb) = on_update {
+        node.as_ref(py).call_method1("on_update", (cb,))?;
+    }
 
     if let (Some(cb), Some(loop_obj)) = (on_update_async, event_loop) {
         let mq = meta_queue.clone();
