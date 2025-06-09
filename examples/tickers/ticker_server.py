@@ -7,7 +7,8 @@ import sys
 parser = argparse.ArgumentParser()
 parser.add_argument('--listen', default='0.0.0.0:7011')
 parser.add_argument('--tickers', default='AAPL,GOOG,MSFT')
-parser.add_argument('--window', type=int, default=5)
+parser.add_argument('--window', type=int, default=390,
+                    help='Size of the history buffer (minutes in a trading day)')
 args = parser.parse_args()
 
 tickers = args.tickers.split(',')
@@ -18,8 +19,9 @@ index = 0
 while True:
     with node.write() as arr:
         arr = arr.reshape(len(tickers), window)
-        for i in range(len(tickers)):
-            arr[i, index % window] = random.uniform(100.0, 200.0)
+        if index < window:
+            for i in range(len(tickers)):
+                arr[i, index] = random.uniform(100.0, 200.0)
         node.send_meta({'index': index})
     with node.read() as data:
         data = data.reshape(len(tickers), window)
