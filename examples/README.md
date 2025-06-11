@@ -38,3 +38,7 @@ use the client to view the whole grid or a sub-region with the `--region` option
 The [yfinance/](yfinance/) folder pulls live data from Yahoo Finance and
 registers the shared array with DuckDB. This mirrors the approach described in
 [this article](https://www.defconq.tech/docs/tutorials/realTimeStocks?trk=feed_main-feed-card_feed-article-content).
+
+## Neural network broadcast example
+
+The [nn_weights/](nn_weights/) folder trains a small neural network on the XOR problem with PyTorch and streams the weights as raw bytes so clients can map them directly for inference.
