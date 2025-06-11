@@ -20,6 +20,7 @@ pub struct Update {
 pub struct UpdatePacket {
     pub updates: Vec<Update>,
     pub meta: Option<String>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -44,8 +45,9 @@ pub struct Subscription {
 
 
 
-fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u8> {
+fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>, version: u64) -> Vec<u8> {
     let mut buf = Vec::new();
+    buf.extend_from_slice(&version.to_le_bytes());
     buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
     for u in updates {
         buf.extend_from_slice(&(u.shape.len() as u32).to_le_bytes());
@@ -249,7 +251,12 @@ async fn read_values(sock: &mut TcpStream, len: usize) -> Result<Option<Vec<f64>
     Ok(Some(vals))
 }
 
-async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>, usize, Vec<f64>, Option<String>)>, Option<String>)>> {
+async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(u64, Vec<(Vec<usize>, usize, Vec<f64>, Option<String>)>, Option<String>)>> {
+    let mut len_buf = [0u8; 8];
+    if !read_exact_checked(sock, &mut len_buf).await? {
+        return Ok(None);
+    }
+    let version = u64::from_le_bytes(len_buf);
     let mut len_buf = [0u8; 4];
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
@@ -288,7 +295,7 @@ async fn read_update_set(sock: &mut TcpStream) -> Result<Option<(Vec<(Vec<usize>
         None
     };
 
-    Ok(Some((updates, meta)))
+    Ok(Some((version, updates, meta)))
 }
 
 fn apply_update(state: &Shared, start_idx: usize, vals: &[f64], len: usize) -> Result<()> {
@@ -440,7 +447,7 @@ pub async fn handle_peer(
             Some(v) => v,
             None => break,
         };
-        let (updates, metadata) = packet;
+        let (_version, updates, metadata) = packet;
         for (shape, start_idx, vals, name) in updates {
             if shape == local_shape && name.is_none() {
                 apply_update(&state, start_idx, &vals, len)?;
@@ -484,7 +491,7 @@ pub async fn serve(
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
                     let meta = pending_meta.lock().unwrap().clone();
-                    let data = filtered_to_bytes(&filtered, &meta);
+                    let data = filtered_to_bytes(&filtered, &meta, 0);
                     if sock.write_all(&data).await.is_ok() {
                         conns.push((sock, sub));
                     }
@@ -500,7 +507,7 @@ pub async fn serve(
                         alive.push((s, sub));
                         continue;
                     }
-                    let data = filtered_to_bytes(&filtered, &u.meta);
+                    let data = filtered_to_bytes(&filtered, &u.meta, u.version);
                     match s.write_all(&data).await {
                         Ok(_) => alive.push((s, sub)),
                         Err(e) => println!("send failed: {}", e),

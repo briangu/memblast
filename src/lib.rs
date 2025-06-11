@@ -12,6 +12,7 @@ use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::runtime::Runtime;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
@@ -33,6 +34,7 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
+    version: AtomicU64,
 }
 
 #[pymethods]
@@ -101,7 +103,8 @@ impl Node {
                 Update { start: s as u32, len: len as u32 }
             })
             .collect();
-        let packet = UpdatePacket { updates, meta };
+        let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
+        let packet = UpdatePacket { updates, meta, version };
         let _ = self.tx.try_send(packet);
     }
 
@@ -316,6 +319,7 @@ fn start(
         pending_meta: pending_meta.clone(),
         callback: RefCell::new(None),
         named: named_arc.clone(),
+        version: AtomicU64::new(0),
     })?;
 
     if let Some(cb) = on_update {
