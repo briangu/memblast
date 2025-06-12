@@ -90,7 +90,7 @@ impl Node {
         if let Some(s) = start {
             ranges.push((s, end));
         }
-        let meta = self.pending_meta.lock().unwrap().take();
+        let meta = self.pending_meta.lock().unwrap().clone();
         if ranges.is_empty() && meta.is_none() {
             return;
         }
