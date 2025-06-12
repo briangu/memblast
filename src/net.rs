@@ -235,20 +235,6 @@ async fn read_update_header(sock: &mut TcpStream) -> Result<Option<(Vec<usize>, 
     Ok(Some((shape, start_idx, val_len)))
 }
 
-async fn read_values(sock: &mut TcpStream, len: usize) -> Result<Option<Vec<f64>>> {
-    let mut buf = vec![0u8; len * 8];
-    if !read_exact_checked(sock, &mut buf).await? {
-        return Ok(None);
-    }
-    let mut vals = Vec::with_capacity(len);
-    for i in 0..len {
-        let mut b = [0u8; 8];
-        b.copy_from_slice(&buf[i * 8..(i + 1) * 8]);
-        vals.push(f64::from_le_bytes(b));
-    }
-    Ok(Some(vals))
-}
-
 async fn read_update_set<F>(sock: &mut TcpStream, mut f: F) -> Result<Option<Option<String>>>
 where
     F: FnMut(Vec<usize>, usize, Vec<f64>, Option<String>) -> Result<()>,
@@ -263,10 +249,12 @@ where
             Some(v) => v,
             None => return Ok(None),
         };
-        let vals = match read_values(sock, val_len).await? {
-            Some(v) => v,
-            None => return Ok(None),
-        };
+        let mut vals = Vec::with_capacity(val_len);
+        for _ in 0..val_len {
+            let mut b = [0u8; 8];
+            if !read_exact_checked(sock, &mut b).await? { return Ok(None); }
+            vals.push(f64::from_le_bytes(b));
+        }
         if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
         let name_len = u32::from_le_bytes(len_buf) as usize;
         let name = if name_len > 0 {
