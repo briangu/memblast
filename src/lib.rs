@@ -235,7 +235,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None, check_hash=false))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -246,6 +246,7 @@ fn start(
     on_update: Option<PyObject>,
     on_update_async: Option<PyObject>,
     event_loop: Option<PyObject>,
+    check_hash: bool,
 ) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
@@ -297,7 +298,7 @@ fn start(
                 target: net::Target::Region(vec![0u32; shape.len()])
             }]
         });
-        let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
+        let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps, hash_check: check_hash };
         let named_clone = named_arc.clone();
         RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
     }

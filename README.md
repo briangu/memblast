@@ -63,3 +63,10 @@ above, then run:
 python -m pytest
 ```
 
+## Hash verification
+
+Clients can optionally request an integrity check on snapshot updates. Pass
+`check_hash=True` to `memblast.start()` to have the server include a SHA‑256
+hash of each snapshot and validate it on receipt. The parameter defaults to
+`False` so there is no extra hashing overhead unless explicitly enabled.
+

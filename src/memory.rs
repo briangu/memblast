@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::fence;
 use std::sync::Arc;
+use sha2::{Digest, Sha256};
 
 pub struct MmapBuf {
     pub mm: MmapMut,
@@ -92,6 +93,21 @@ impl Shared {
             fence(Ordering::Acquire);
             if self.seq.load(Ordering::Relaxed) == start { break; }
         }
+    }
+
+    pub fn snapshot_hash(&self) -> [u8; 32] {
+        let len: usize = self.shape().iter().product();
+        let mut buf = vec![0f64; len];
+        self.read_snapshot(&mut buf);
+        let bytes = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr() as *const u8, len * 8)
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let result = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&result);
+        out
     }
 }
 
