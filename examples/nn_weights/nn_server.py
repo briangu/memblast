@@ -19,7 +19,7 @@ class Net(torch.nn.Module):
         x = torch.tanh(self.l1(x))
         return torch.sigmoid(self.l2(x))
 
-net = Net().double()
+net = Net().float()
 vec = torch.nn.utils.parameters_to_vector(net.parameters())
 node = memblast.start("nn_server", listen=args.listen, shape=[len(vec)])
 
