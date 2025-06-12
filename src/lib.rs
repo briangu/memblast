@@ -34,7 +34,7 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
-    version: AtomicU64,
+    version: Arc<AtomicU64>,
 }
 
 #[pymethods]
@@ -261,6 +261,7 @@ fn start(
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
+    let version = Arc::new(AtomicU64::new(0));
     let mut named_map: HashMap<String, Shared> = HashMap::new();
     let subscription: Option<Vec<Mapping>> = if let Some(v) = maps {
         let mut out = Vec::new();
@@ -306,7 +307,8 @@ fn start(
         });
         let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
+        let ver_clone = version.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -323,7 +325,7 @@ fn start(
         pending_meta: pending_meta.clone(),
         callback: RefCell::new(None),
         named: named_arc.clone(),
-        version: AtomicU64::new(0),
+        version: version.clone(),
     })?;
 
     if let Some(cb) = on_update {

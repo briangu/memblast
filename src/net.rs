@@ -5,7 +5,7 @@ use tokio::time::{self, Duration};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
 use crate::memory::Shared;
 
@@ -435,6 +435,7 @@ pub async fn handle_peer(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    version: Arc<AtomicU64>,
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
@@ -447,7 +448,8 @@ pub async fn handle_peer(
             Some(v) => v,
             None => break,
         };
-        let (_version, updates, metadata) = packet;
+        let (ver, updates, metadata) = packet;
+        version.store(ver, Ordering::SeqCst);
         for (shape, start_idx, vals, name) in updates {
             if shape == local_shape && name.is_none() {
                 apply_update(&state, start_idx, &vals, len)?;
@@ -525,6 +527,7 @@ pub async fn client(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    version: Arc<AtomicU64>,
     sub: Subscription,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
@@ -537,7 +540,7 @@ pub async fn client(
                 if sock.write_all(&data).await.is_err() {
                     continue;
                 }
-                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone()).await;
+                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone(), version.clone()).await;
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }
