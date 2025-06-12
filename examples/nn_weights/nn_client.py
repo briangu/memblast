@@ -20,7 +20,7 @@ class Net(torch.nn.Module):
         x = torch.tanh(self.l1(x))
         return torch.sigmoid(self.l2(x))
 
-net = Net().double()
+net = Net().float()
 vec = torch.nn.utils.parameters_to_vector(net.parameters())
 node = memblast.start("nn_client", server=args.server, shape=[len(vec)])
 
@@ -32,7 +32,7 @@ def read_bytes(node):
 X = torch.tensor([[0.,0.],[0.,1.],[1.,0.],[1.,1.]])
 
 def load_weights(buf):
-    t = torch.frombuffer(buf, dtype=torch.float64)
+    t = torch.frombuffer(buf, dtype=torch.float32)
     torch.nn.utils.vector_to_parameters(t, net.parameters())
 
 while True:
