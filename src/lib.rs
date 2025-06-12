@@ -39,6 +39,10 @@ struct Node {
 
 #[pymethods]
 impl Node {
+    #[getter]
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
     fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
         let (ptr, shape) = if let Some(n) = name {
             let shared = self.named.get(n)?;
