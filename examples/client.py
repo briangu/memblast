@@ -16,6 +16,7 @@ node = memblast.start("b", server=args.server, shape=[10,10], on_update=handle_u
 while True:
     with node.read() as arr:
         print("\033[H\033[J", end="")  # Move cursor to home position and clear screen
+        print(f"version: {node.version}")
         print(arr)
         sys.stdout.flush()
     time.sleep(1)
