@@ -1,10 +1,8 @@
 import argparse
-import time
 import numpy as np
 import memblast
 import sys
-import asyncio
-import signal
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--server', default='0.0.0.0:7050')
@@ -27,29 +25,5 @@ async def handle_update(node, meta):
         sys.stdout.flush()
 
 
-async def main() -> None:
-    loop   = asyncio.get_running_loop()
-    stop   = asyncio.Event()
+memblast.start('heatmap_client', server=args.server, shape=[size, size], on_update_async=handle_update)
 
-    memblast.start('heatmap_client', server=args.server, shape=[size, size], on_update_async=handle_update, event_loop=loop)
-
-    def _arm_shutdown(sig: signal.Signals):
-        loop.create_task(_shutdown(sig))
-
-    async def _shutdown(sig):
-        print(f"\n💡 received {sig.name}, shutting down …")
-        stop.set()                        # 1) unblock Quart
-        await asyncio.gather(
-            return_exceptions=True,
-        )
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _arm_shutdown, sig)
-
-    await stop.wait()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n💡 KeyboardInterrupt → shutdown request already handled.")

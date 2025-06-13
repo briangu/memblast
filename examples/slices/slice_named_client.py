@@ -1,5 +1,4 @@
 import argparse
-import time
 import memblast
 import sys
 import numpy as np
@@ -14,15 +13,22 @@ tickers = [int(t) for t in args.tickers.split(',') if t]
 
 maps = [([t, 0], [1, args.window], None, f'ticker_{t}') for t in tickers]
 
-node = memblast.start('named_client', server=args.server, shape=[1], maps=maps)
+window = args.window
 
-while True:
+async def handle_update(node, meta):
     with node.read():
         print("\033[H\033[J", end="")
         for t in tickers:
             arr = node.ndarray(f'ticker_{t}')
             if arr is not None:
-                data = np.array(arr).reshape(1, args.window)
+                data = np.array(arr).reshape(1, window)
                 print(f'{t}: {data[0]}')
         sys.stdout.flush()
-    time.sleep(1)
+
+memblast.start(
+    'named_client',
+    server=args.server,
+    shape=[1],
+    maps=maps,
+    on_update_async=handle_update,
+)

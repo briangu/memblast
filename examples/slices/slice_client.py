@@ -1,5 +1,4 @@
 import argparse
-import time
 import memblast
 import sys
 
@@ -15,13 +14,20 @@ maps = []
 for i, t in enumerate(tickers):
     maps.append(([t, 0], [1, args.window], [i, 0], None))
 
-node = memblast.start('slice_client', server=args.server, shape=[len(tickers), args.window], maps=maps)
+window = args.window
 
-while True:
+async def handle_update(node, meta):
     with node.read() as arr:
-        arr = arr.reshape(len(tickers), args.window)
+        arr = arr.reshape(len(tickers), window)
         print("\033[H\033[J", end="")
         for t, row in zip(tickers, arr):
             print(f'{t}: {row}')
         sys.stdout.flush()
-    time.sleep(1)
+
+memblast.start(
+    'slice_client',
+    server=args.server,
+    shape=[len(tickers), window],
+    maps=maps,
+    on_update_async=handle_update,
+)

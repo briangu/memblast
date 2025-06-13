@@ -1,5 +1,4 @@
 import argparse
-import time
 import memblast
 import duckdb
 
@@ -15,21 +14,29 @@ maps = []
 for i, t in enumerate(tickers):
     maps.append(([t, 0], [1, args.window], [i, 0], None))
 
-node = memblast.start('slice_duckdb_client', server=args.server, shape=[len(tickers), args.window], maps=maps)
+window = args.window
 
 con = duckdb.connect()
+query = 'SELECT ' + ', '.join(f'AVG(column{i})' for i in range(len(tickers))) + ' FROM data'
+initialized = False
 
-# Register the numpy array ONCE. This is a live view into the shared memory,
-# so DuckDB will always see the latest data without re-registering.
-arr = node.ndarray()
-arr = arr.reshape(len(tickers), args.window)
-con.register('data', arr)
-
-while True:
+async def handle_update(node, meta):
+    global initialized
+    if not initialized:
+        arr = node.ndarray().reshape(len(tickers), window)
+        con.register('data', arr)
+        initialized = True
     with node.read() as arr:
-        arr = arr.reshape(len(tickers), args.window)
+        arr = arr.reshape(len(tickers), window)
         print(arr.shape)
-        result = con.execute('SELECT AVG(column0), AVG(column1), AVG(column2) FROM data').fetchall()[0]
+        result = con.execute(query).fetchall()[0]
         print("\033[H\033[J", end="")
         print(result)
-    time.sleep(1)
+
+memblast.start(
+    'slice_duckdb_client',
+    server=args.server,
+    shape=[len(tickers), window],
+    maps=maps,
+    on_update_async=handle_update,
+)

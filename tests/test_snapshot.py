@@ -14,7 +14,8 @@ def test_snapshot_on_connect():
     def cb(d):
         meta.update(d)
 
-    node_b = memblast.start("b", server="127.0.0.1:7200", shape=[2], on_update=cb)
+    node_b = memblast.start("b", server="127.0.0.1:7200", shape=[2])
+    node_b.on_update(cb)
     node_a.send_meta({"last_index": 1})
     node_a.flush(0)
     # allow time for snapshot to transfer

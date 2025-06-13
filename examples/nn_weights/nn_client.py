@@ -1,10 +1,7 @@
 import argparse
-import time
-import numpy as np
 import torch
 import memblast
 import sys
-from contextlib import contextmanager
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--server', default='0.0.0.0:7040')
@@ -22,26 +19,26 @@ class Net(torch.nn.Module):
 
 net = Net().float()
 vec = torch.nn.utils.parameters_to_vector(net.parameters())
-node = memblast.start("nn_client", server=args.server, shape=[len(vec)])
 
-@contextmanager
-def read_bytes(node):
-    with node.read() as arr:
-        yield memoryview(arr).cast("B")
-
-X = torch.tensor([[0.,0.],[0.,1.],[1.,0.],[1.,1.]])
+X = torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]])
 
 def load_weights(buf):
     t = torch.frombuffer(buf, dtype=torch.float32)
     torch.nn.utils.vector_to_parameters(t, net.parameters())
 
-while True:
-    with read_bytes(node) as buf:
-        load_weights(buf)
+async def handle_update(node, meta):
+    with node.read() as arr:
+        load_weights(memoryview(arr).cast("B"))
         out = net(X)
         preds = (out > 0.5).int().view(-1).tolist()
         print("\033[H\033[J", end="")
         for inp, p in zip(X.int().tolist(), preds):
             print(f"{inp} -> {p}")
         sys.stdout.flush()
-    time.sleep(1)
+
+memblast.start(
+    "nn_client",
+    server=args.server,
+    shape=[len(vec)],
+    on_update_async=handle_update,
+)
