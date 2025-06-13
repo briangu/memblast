@@ -19,15 +19,15 @@ initialized = False
 async def handle_update(node, meta):
     global initialized, con, query, tickers, window
     if not initialized:
-        arr = node.ndarray().reshape(len(tickers), window)
-        con.register('data', arr)
+        data = node.ndarray().reshape(len(tickers), window)
+        con.register('data', data)
         initialized = True
     print("\033[H\033[J", end="")
     with node.read() as arr:
-        arr = arr.reshape(len(tickers), window)
+        data = arr.reshape(len(tickers), window)
         means = con.execute(query).fetchall()[0]
     for i, (t, m) in enumerate(zip(tickers, means)):
-        print(f'{t}: data: {arr[i]} mean: {m:.2f}')
+        print(f'{t}: data: {data[i]} mean: {m:.2f}')
     sys.stdout.flush()
 
 memblast.start(
