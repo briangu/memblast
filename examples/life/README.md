@@ -1,11 +1,13 @@
 # Conway's Game of Life
 
-This example runs a 256×256 Conway game of life simulation using **memblast**.
-The server maintains the world state and clients subscribe to updates.
+This example runs a Conway game of life simulation using **memblast**. The
+server maintains the world state and clients subscribe to updates. By default
+the world is 64×64 but the size can be adjusted.
 
 ## Files
 
-- `life_server.py` – Hosts the 256×256 world and updates it every half second.
+- `life_server.py` – Hosts the world and updates it every half second. Pass
+  `--width` to change the grid size (default 64).
 - `life_client.py` – Displays the world. Pass `--region row,col,h,w` to view
   only a portion of the grid.
 

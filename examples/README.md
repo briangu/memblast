@@ -12,6 +12,7 @@ All commands below should be run from the repository root.
 
 - `server.py` – Starts a server hosting a 10×10 array and updates a few random values every second.
 - `client.py` – Connects to the server and prints the array along with any metadata updates.
+- `client_ws.py` – WebSocket client implemented with Quart.
 
 Run them in separate terminals:
 
@@ -30,8 +31,9 @@ The [tickers/](tickers/) folder streams fake stock ticker data. See `tickers/REA
 
 ## Game of Life example
 
-The [life/](life/) folder contains a 256×256 Conway game of life. Run the server and
-use the client to view the whole grid or a sub-region with the `--region` option.
+The [life/](life/) folder contains a Conway game of life. By default the server
+runs a 64×64 world. Use the client to view the whole grid or a sub-region with
+the `--region` option.
 
 ## Yahoo Finance example
 
