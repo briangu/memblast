@@ -331,6 +331,16 @@ fn start(
 
     if let Some(cb) = on_update {
         node.as_ref(py).call_method1("on_update", (cb,))?;
+        let node_clone = node.clone();
+        std::thread::spawn(move || {
+            loop {
+                Python::with_gil(|py| {
+                    let cell = node_clone.as_ref(py).borrow();
+                    let _ = cell.process_meta(py);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
     }
 
     if let (Some(cb), Some(loop_obj)) = (on_update_async, event_loop) {
