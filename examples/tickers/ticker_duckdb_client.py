@@ -14,7 +14,7 @@ async def handle_update(node, meta):
         con.register('data', arr)
         initialized = True
     with node.read() as arr:
-        data = np.array(arr).reshape(len(tickers), window)
+        arr = np.array(arr).reshape(len(tickers), window)
         valid = min(latest_idx + 1, window)
         means = (
             con.execute(query_template.format(limit=valid)).fetchall()[0]
