@@ -62,14 +62,14 @@ fn filtered_to_bytes(
         }
         buf.extend_from_slice(&u.start.to_le_bytes());
         buf.extend_from_slice(&(u.values.len() as u32).to_le_bytes());
-        for v in &u.values {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
         if let Some(name) = &u.name {
             buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
             buf.extend_from_slice(name.as_bytes());
         } else {
             buf.extend_from_slice(&(0u32.to_le_bytes()));
+        }
+        for v in &u.values {
+            buf.extend_from_slice(&v.to_le_bytes());
         }
     }
     if let Some(meta) = meta {
