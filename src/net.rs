@@ -466,12 +466,12 @@ pub async fn handle_peer(
                     values: vals.clone(),
                 })
                 .collect::<Vec<_>>();
-            if version == 0 {
+            if ver == 0 {
                 let mut buf = vec![0.0; len];
                 state.read_snapshot(&mut buf);
                 sm.add_snapshot(0, buf);
             } else {
-                sm.add_updates(version, diffs);
+                sm.add_updates(ver, diffs);
             }
         }
         for (shape, start_idx, vals, name) in updates {

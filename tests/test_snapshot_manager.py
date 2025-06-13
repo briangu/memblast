@@ -12,10 +12,10 @@ def test_get_version_after_snapshot():
     with node.write() as arr:
         arr[1] = 4.0
 
-    assert node.get_version(0) is None
-    assert node.get_version(1) == [1.0, 2.0]
-    assert node.get_version(2) == [3.0, 2.0]
-    assert node.get_version(3) == [3.0, 4.0]
+    assert node.version_data(0) is None
+    assert node.version_data(1) == [1.0, 2.0]
+    assert node.version_data(2) == [3.0, 2.0]
+    assert node.version_data(3) == [3.0, 4.0]
 
 
 def test_get_version_without_snapshot_returns_none():
@@ -24,7 +24,7 @@ def test_get_version_without_snapshot_returns_none():
         arr[0] = 5.0
         arr[1] = 6.0
     # no explicit snapshot taken
-    assert node.get_version(1) is None
+    assert node.version_data(1) is None
 
 
 

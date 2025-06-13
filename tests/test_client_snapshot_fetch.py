@@ -17,6 +17,6 @@ def test_client_fetch_versions():
     client = memblast.start("cli", server="127.0.0.1:7300", shape=[2], snapshots=True)
     time.sleep(2)
 
-    assert client.get_version(1) == [1.0, 2.0]
-    assert client.get_version(2) == [3.0, 2.0]
-    assert client.get_version(3) == [3.0, 4.0]
+    assert client.version_data(1) == [1.0, 2.0]
+    assert client.version_data(2) == [3.0, 2.0]
+    assert client.version_data(3) == [3.0, 4.0]

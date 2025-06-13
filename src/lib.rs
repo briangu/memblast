@@ -167,7 +167,7 @@ impl Node {
         Ok(ReadGuard { node: node_ref, arr: Some(data) })
     }
 
-    fn get_version(&self, version: u64) -> PyResult<Option<Vec<f64>>> {
+    fn version_data(&self, version: u64) -> PyResult<Option<Vec<f64>>> {
         if let Some(sm) = &self.snapshot {
             if let Some(addr) = self.server_addr {
                 let res = RUNTIME.block_on(net::request_version(addr, version))
@@ -301,7 +301,6 @@ fn start(
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
-    let version = Arc::new(AtomicU64::new(0));
     let mut named_map: HashMap<String, Shared> = HashMap::new();
     let snapshot_mgr = if snapshots { Some(SnapshotManager::new()) } else { None };
     let version = Arc::new(AtomicU64::new(0));
@@ -355,7 +354,7 @@ fn start(
         let named_clone = named_arc.clone();
         let snap = snapshot_mgr.clone();
         let ver = version.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver, snap, sub));
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver, sub, snap));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
