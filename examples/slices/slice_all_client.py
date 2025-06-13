@@ -7,9 +7,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--server', default='0.0.0.0:7020')
 args = parser.parse_args()
 
-def handle_update(meta):
-    print("metadata", meta)
-
 
 node = memblast.start("b", server=args.server, shape=[100,5], on_update=handle_update)
 

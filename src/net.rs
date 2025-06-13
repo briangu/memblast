@@ -5,7 +5,7 @@ use tokio::time::{self, Duration};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
 use crate::memory::Shared;
 
@@ -20,6 +20,7 @@ pub struct Update {
 pub struct UpdatePacket {
     pub updates: Vec<Update>,
     pub meta: Option<String>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -40,12 +41,19 @@ pub struct Subscription {
     pub name: String,
     pub client_shape: Vec<u32>,
     pub maps: Vec<Mapping>,
+    pub hash_check: bool,
 }
 
 
 
-fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u8> {
+fn filtered_to_bytes(
+    updates: &[FilteredUpdate],
+    meta: &Option<String>,
+    version: u64,
+    hash: Option<&[u8; 32]>,
+) -> Vec<u8> {
     let mut buf = Vec::new();
+    buf.extend_from_slice(&version.to_le_bytes());
     buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
     for u in updates {
         buf.extend_from_slice(&(u.shape.len() as u32).to_le_bytes());
@@ -70,6 +78,9 @@ fn filtered_to_bytes(updates: &[FilteredUpdate], meta: &Option<String>) -> Vec<u
         buf.extend_from_slice(bytes);
     } else {
         buf.extend_from_slice(&(0u32.to_le_bytes()));
+    }
+    if let Some(h) = hash {
+        buf.extend_from_slice(h);
     }
     buf
 }
@@ -108,6 +119,7 @@ pub fn subscription_to_bytes(sub: &Subscription) -> Vec<u8> {
             }
         }
     }
+    buf.push(if sub.hash_check { 1u8 } else { 0u8 });
     buf
 }
 
@@ -201,7 +213,10 @@ async fn read_subscription(sock: &mut TcpStream) -> Result<Option<Subscription>>
         };
         maps.push(Mapping { server_start, shape: region_shape, target });
     }
-    Ok(Some(Subscription { name, client_shape: shape, maps }))
+    let mut flag = [0u8;1];
+    if !read_exact_checked(sock, &mut flag).await? { return Ok(None); }
+    let hash_check = flag[0] != 0u8;
+    Ok(Some(Subscription { name, client_shape: shape, maps, hash_check }))
 }
 
 async fn read_update_header(sock: &mut TcpStream) -> Result<Option<(Vec<usize>, usize, usize)>> {
@@ -240,7 +255,13 @@ async fn read_update_set(
     state: &Shared,
     named: &HashMap<String, Shared>,
     local_shape: &[usize],
-) -> Result<Option<Option<String>>> {
+    with_hash: bool,
+) -> Result<Option<(u64, Option<String>, Option<[u8; 32]>)>> {
+    let mut len_buf = [0u8; 8];
+    if !read_exact_checked(sock, &mut len_buf).await? {
+        return Ok(None);
+    }
+    let version = u64::from_le_bytes(len_buf);
     let mut len_buf = [0u8; 4];
     if !read_exact_checked(sock, &mut len_buf).await? {
         return Ok(None);
@@ -296,8 +317,15 @@ async fn read_update_set(
     } else {
         None
     };
+    let hash = if with_hash {
+        let mut h = [0u8; 32];
+        if !read_exact_checked(sock, &mut h).await? { return Ok(None); }
+        Some(h)
+    } else {
+        None
+    };
 
-    Ok(Some(meta))
+    Ok(Some((version, meta, hash)))
 }
 
 async fn apply_update(
@@ -451,6 +479,8 @@ pub async fn handle_peer(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    version: Arc<AtomicU64>,
+    hash_check: bool,
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
@@ -458,13 +488,20 @@ pub async fn handle_peer(
     let named_map = named.clone();
 
     loop {
-        let metadata = match read_update_set(&mut sock, &state, &named_map, &local_shape).await? {
+        let (ver, metadata, hash) = match read_update_set(&mut sock, &state, &named_map, &local_shape, hash_check).await? {
             Some(v) => v,
             None => break,
         };
+        version.store(ver, Ordering::SeqCst);
         if let Some(m) = metadata {
             let mut q = meta.lock().unwrap();
             q.push(m);
+        }
+        if let (true, Some(h)) = (hash_check, hash) {
+            let local = state.snapshot_hash();
+            if h != local {
+                println!("hash mismatch from {:?}", addr);
+            }
         }
     }
     println!("peer {:?} disconnected", addr);
@@ -490,7 +527,8 @@ pub async fn serve(
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
                     let meta = pending_meta.lock().unwrap().clone();
-                    let data = filtered_to_bytes(&filtered, &meta);
+                    let snap_hash = if sub.hash_check { Some(state.snapshot_hash()) } else { None };
+                    let data = filtered_to_bytes(&filtered, &meta, 0, snap_hash.as_ref());
                     if sock.write_all(&data).await.is_ok() {
                         conns.push((sock, sub));
                     }
@@ -500,13 +538,17 @@ pub async fn serve(
                 let u = match res { Ok(v) => v, Err(_) => break };
                 let mut alive = Vec::new();
                 let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
+                let hash_val = if conns.iter().any(|(_, sub)| sub.hash_check) {
+                    Some(state.snapshot_hash())
+                } else { None };
                 for (mut s, sub) in conns {
                     let filtered = filter_updates(&u.updates, &sub, &state, &server_shape);
                     if filtered.is_empty() && u.meta.is_none() {
                         alive.push((s, sub));
                         continue;
                     }
-                    let data = filtered_to_bytes(&filtered, &u.meta);
+                    let hash_ref = if sub.hash_check { hash_val.as_ref() } else { None };
+                    let data = filtered_to_bytes(&filtered, &u.meta, u.version, hash_ref);
                     match s.write_all(&data).await {
                         Ok(_) => alive.push((s, sub)),
                         Err(e) => println!("send failed: {}", e),
@@ -524,6 +566,7 @@ pub async fn client(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    version: Arc<AtomicU64>,
     sub: Subscription,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
@@ -536,7 +579,14 @@ pub async fn client(
                 if sock.write_all(&data).await.is_err() {
                     continue;
                 }
-                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone()).await;
+                let res = handle_peer(
+                    sock,
+                    state.clone(),
+                    named.clone(),
+                    meta.clone(),
+                    version.clone(),
+                    sub.hash_check,
+                ).await;
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }

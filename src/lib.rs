@@ -12,6 +12,7 @@ use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::runtime::Runtime;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
@@ -33,10 +34,15 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
+    version: Arc<AtomicU64>,
 }
 
 #[pymethods]
 impl Node {
+    #[getter]
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
     fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
         let (ptr, shape) = if let Some(n) = name {
             let shared = self.named.get(n)?;
@@ -90,7 +96,7 @@ impl Node {
         if let Some(s) = start {
             ranges.push((s, end));
         }
-        let meta = self.pending_meta.lock().unwrap().take();
+        let meta = self.pending_meta.lock().unwrap().clone();
         if ranges.is_empty() && meta.is_none() {
             return;
         }
@@ -101,7 +107,8 @@ impl Node {
                 Update { start: s as u32, len: len as u32 }
             })
             .collect();
-        let packet = UpdatePacket { updates, meta };
+        let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
+        let packet = UpdatePacket { updates, meta, version };
         let _ = self.tx.try_send(packet);
     }
 
@@ -235,7 +242,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None, check_hash=false))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -246,11 +253,50 @@ fn start(
     on_update: Option<PyObject>,
     on_update_async: Option<PyObject>,
     event_loop: Option<PyObject>,
+    check_hash: bool,
 ) -> PyResult<Py<Node>> {
-    let shape = shape.unwrap_or_else(|| vec![10]);
-    let len: usize = shape.iter().product();
-    let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    let state = Shared::new(buf);
+    let version = Arc::new(AtomicU64::new(0));
+        let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps, hash_check: check_hash };
+        let ver_clone = version.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub));
+    let node = Py::new(py, Node {
+        meta_queue: meta_queue.clone(),
+        pending_meta: pending_meta.clone(),
+        named: named_arc.clone(),
+        version: version.clone(),
+    })?;
+
+    if let Some(cb) = on_update {
+        node.as_ref(py).call_method1("on_update", (cb,))?;
+    }
+
+    if let (Some(cb), Some(loop_obj)) = (on_update_async, event_loop) {
+        let mq = meta_queue.clone();
+        let node_clone = node.clone();
+        std::thread::spawn(move || {
+            loop {
+                let metas = {
+                    let mut q = mq.lock().unwrap();
+                    if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) }
+                };
+                if let Some(items) = metas {
+                    Python::with_gil(|py| {
+                        let loads = py.import("json").unwrap().getattr("loads").unwrap();
+                        for m in items {
+                            let obj = loads.call1((m,)).unwrap();
+                            let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                            py.import("asyncio").unwrap()
+                                .call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py)))
+                                .unwrap();
+                        }
+                    });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+    }
+
+    Ok(node)
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
