@@ -242,7 +242,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None, check_hash=false))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None, check_hash=false, block=true))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -254,6 +254,7 @@ fn start(
     on_update_async: Option<PyObject>,
     event_loop: Option<PyObject>,
     check_hash: bool,
+    block: bool,
 ) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
@@ -331,16 +332,40 @@ fn start(
 
     if let Some(cb) = on_update {
         node.as_ref(py).call_method1("on_update", (cb,))?;
-        let node_clone = node.clone();
-        std::thread::spawn(move || {
-            loop {
-                Python::with_gil(|py| {
-                    let cell = node_clone.as_ref(py).borrow();
-                    let _ = cell.process_meta(py);
+        if on_update_async.is_none() && event_loop.is_none() {
+            let node_clone = node.clone();
+            if block {
+                loop {
+                    Python::with_gil(|py| -> PyResult<()> {
+                        py.check_signals()?;
+                        let cell = node_clone.as_ref(py).borrow();
+                        cell.process_meta(py)
+                    })?;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            } else {
+                std::thread::spawn(move || {
+                    loop {
+                        Python::with_gil(|py| {
+                            let cell = node_clone.as_ref(py).borrow();
+                            let _ = cell.process_meta(py);
+                        });
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                 });
-                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-        });
+        } else {
+            let node_clone = node.clone();
+            std::thread::spawn(move || {
+                loop {
+                    Python::with_gil(|py| {
+                        let cell = node_clone.as_ref(py).borrow();
+                        let _ = cell.process_meta(py);
+                    });
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+        }
     }
 
     if let (Some(cb), Some(loop_obj)) = (on_update_async, event_loop) {
