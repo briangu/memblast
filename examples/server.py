@@ -21,6 +21,7 @@ while True:
         node.send_meta({"last_index": last})
     with node.read() as arr:
         print("\033[H\033[J", end="")
+        print(f"version: {node.version}")
         print(arr)
         sys.stdout.flush()
     time.sleep(1)

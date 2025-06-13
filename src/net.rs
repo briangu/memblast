@@ -5,7 +5,7 @@ use tokio::time::{self, Duration};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
 use crate::memory::Shared;
 
@@ -442,6 +442,7 @@ pub async fn handle_peer(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    version: Arc<AtomicU64>,
     snapshot: Option<crate::snapshot::SnapshotManager>,
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
@@ -455,7 +456,8 @@ pub async fn handle_peer(
             Some(v) => v,
             None => break,
         };
-        let (version, updates, metadata) = packet;
+        let (ver, updates, metadata) = packet;
+        version.store(ver, Ordering::SeqCst);
         if let Some(sm) = &snapshot {
             let diffs = updates
                 .iter()
@@ -569,6 +571,7 @@ pub async fn client(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    version: Arc<AtomicU64>,
     sub: Subscription,
     snapshot: Option<crate::snapshot::SnapshotManager>,
 ) -> Result<()> {
@@ -582,7 +585,7 @@ pub async fn client(
                 if sock.write_all(&data).await.is_err() {
                     continue;
                 }
-                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone(), snapshot.clone()).await;
+                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone(), version.clone(), snapshot.clone()).await;
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }

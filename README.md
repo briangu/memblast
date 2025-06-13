@@ -1,6 +1,19 @@
 # memblast
 
-This project exposes a small Raft-backed shared memory buffer as a Python extension module.
+`memblast` is a high-performance publish/subscribe ticker plant built around a shared memory buffer.
+Updates are replicated across nodes and exposed as NumPy arrays for lightning-fast Python access.
+
+### Features
+
+- `version` property to track updates on each node
+- Subscribe to named sub regions and access them via `node.ndarray(name)`
+- Send and receive JSON metadata with synchronous or async callbacks
+
+### In progress
+
+- Switchable network layer (TCP or RDMA)
+- Metrics collection
+- Snapshots and MVCC
 
 ## Setup
 
@@ -32,6 +45,10 @@ In another terminal, connect with a client:
 ```bash
 python examples/client.py --server 0.0.0.0:7010
 ```
+Alternatively, a simple Quart-based WebSocket client is provided:
+```bash
+python examples/client_ws.py --server 0.0.0.0:7010
+```
 
 Additional example categories live under `examples/slices` and
 `examples/tickers`. The ticker examples stream random price updates for a set of
@@ -51,8 +68,9 @@ Connect with the ticker client:
 python examples/tickers/ticker_client.py --server 0.0.0.0:7011
 ```
 
-The `examples/life` directory runs a 256×256 Conway game of life. Start the server
-with `python examples/life/life_server.py` and connect using
+The `examples/life` directory runs a Conway game of life. The server defaults to
+a 64×64 world but the size is configurable with `--width`. Start the server with
+`python examples/life/life_server.py` and connect using
 `python examples/life/life_client.py`. Pass `--region` to the client to view a
 sub-region of the world.
 ## Running the tests

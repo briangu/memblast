@@ -37,12 +37,16 @@ struct Node {
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
     version: Arc<AtomicU64>,
-    server_addr: Option<SocketAddr>,
     snapshot: Option<SnapshotManager>,
+    server_addr: Option<SocketAddr>,
 }
 
 #[pymethods]
 impl Node {
+    #[getter]
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
     fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
         let (ptr, shape) = if let Some(n) = name {
             let shared = self.named.get(n)?;
@@ -96,7 +100,7 @@ impl Node {
         if let Some(s) = start {
             ranges.push((s, end));
         }
-        let meta = self.pending_meta.lock().unwrap().take();
+        let meta = self.pending_meta.lock().unwrap().clone();
         if ranges.is_empty() && meta.is_none() {
             return;
         }
@@ -297,6 +301,7 @@ fn start(
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
+    let version = Arc::new(AtomicU64::new(0));
     let mut named_map: HashMap<String, Shared> = HashMap::new();
     let snapshot_mgr = if snapshots { Some(SnapshotManager::new()) } else { None };
     let version = Arc::new(AtomicU64::new(0));
@@ -349,7 +354,8 @@ fn start(
         let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
         let snap = snapshot_mgr.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub, snap));
+        let ver = version.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver, snap, sub));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -367,8 +373,8 @@ fn start(
         callback: RefCell::new(None),
         named: named_arc.clone(),
         version: version.clone(),
-        server_addr: server_addr_parsed,
         snapshot: snapshot_mgr.clone(),
+        server_addr: server_addr_parsed,
     })?;
 
     if let Some(cb) = on_update {
