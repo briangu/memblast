@@ -12,6 +12,7 @@ use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::runtime::Runtime;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
@@ -33,10 +34,15 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
+    version: Arc<AtomicU64>,
 }
 
 #[pymethods]
 impl Node {
+    #[getter]
+    fn version(&self) -> u64 {
+        self.version.load(Ordering::SeqCst)
+    }
     fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
         let (ptr, shape) = if let Some(n) = name {
             let shared = self.named.get(n)?;
@@ -101,7 +107,8 @@ impl Node {
                 Update { start: s as u32, len: len as u32 }
             })
             .collect();
-        let packet = UpdatePacket { updates, meta };
+        let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
+        let packet = UpdatePacket { updates, meta, version };
         let _ = self.tx.try_send(packet);
     }
 
@@ -255,6 +262,7 @@ fn start(
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
+    let version = Arc::new(AtomicU64::new(0));
     let mut named_map: HashMap<String, Shared> = HashMap::new();
     let subscription: Option<Vec<Mapping>> = if let Some(v) = maps {
         let mut out = Vec::new();
@@ -300,7 +308,8 @@ fn start(
         });
         let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps, hash_check: check_hash };
         let named_clone = named_arc.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
+        let ver_clone = version.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -317,6 +326,7 @@ fn start(
         pending_meta: pending_meta.clone(),
         callback: RefCell::new(None),
         named: named_arc.clone(),
+        version: version.clone(),
     })?;
 
     if let Some(cb) = on_update {
