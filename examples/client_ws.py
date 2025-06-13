@@ -44,7 +44,7 @@ async def main() -> None:
 
     memblast.start(
         "web", server=args.server, shape=[10, 10],
-        on_update_async=handle_update, event_loop=loop,
+        on_update=handle_update, event_loop=loop,
     )
 
     def _arm_shutdown(sig: signal.Signals):

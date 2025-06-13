@@ -2,18 +2,24 @@ import argparse
 import time
 import memblast
 import sys
+import asyncio
+import threading
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--server', default='0.0.0.0:7010')
 parser.add_argument('--check-hash', action='store_true', help='verify snapshots')
 args = parser.parse_args()
 
-def handle_update(meta):
+async def handle_update(_node, meta):
     print("metadata", meta)
 
 
+loop = asyncio.new_event_loop()
+t = threading.Thread(target=loop.run_forever)
+t.start()
+
 node = memblast.start("b", server=args.server, shape=[10,10], on_update=handle_update,
-                      check_hash=args.check_hash)
+                      event_loop=loop, check_hash=args.check_hash)
 
 while True:
     with node.read() as arr:

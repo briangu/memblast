@@ -3,6 +3,8 @@ import time
 import numpy as np
 import memblast
 import sys
+import asyncio
+import threading
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--server', default='0.0.0.0:7011')
@@ -13,12 +15,16 @@ args = parser.parse_args()
 
 tickers = args.tickers.split(',')
 window = args.window
-def handle_update(meta):
+async def handle_update(_node, meta):
     global latest_idx
     latest_idx = meta.get('index', latest_idx)
 
 
-node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window], on_update=handle_update)
+loop = asyncio.new_event_loop()
+t = threading.Thread(target=loop.run_forever)
+t.start()
+
+node = memblast.start("ticker_client", server=args.server, shape=[len(tickers), window], on_update=handle_update, event_loop=loop)
 
 latest_idx = -1
 
