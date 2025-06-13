@@ -42,3 +42,8 @@ registers the shared array with DuckDB. This mirrors the approach described in
 ## Neural network broadcast example
 
 The [nn_weights/](nn_weights/) folder trains a small neural network on the XOR problem with PyTorch and streams the weights as raw bytes so clients can map them directly for inference.
+
+## Heatmap example
+
+The [heatmap/](heatmap/) folder streams a dynamic sine-wave heatmap. Clients render it as ASCII art.
+
