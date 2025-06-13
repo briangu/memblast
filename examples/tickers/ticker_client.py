@@ -26,12 +26,12 @@ args = parser.parse_args()
 
 tickers = args.tickers.split(',')
 window = args.window
+latest_idx = -1
+
 node = memblast.start(
     "ticker_client",
     server=args.server,
     shape=[len(tickers), window],
     on_update_async=handle_update,
 )
-
-latest_idx = -1
 
