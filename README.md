@@ -18,6 +18,12 @@ This project exposes a small Raft-backed shared memory buffer as a Python extens
    maturin develop --release
    ```
 
+### Runtime Metrics
+
+`memblast` exposes Prometheus metrics when compiled with the default features.
+The exporter listens on `0.0.0.0:9898` at the `/metrics` path and reports Tokio
+runtime and task statistics collected via `tokio-metrics`.
+
 ## Running the examples
 
 The repository contains a number of example programs under `examples/`. The

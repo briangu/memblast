@@ -1,5 +1,6 @@
 mod memory;
 mod net;
+mod metrics;
 
 use memory::{MmapBuf, Shared};
 use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
@@ -255,6 +256,7 @@ fn start(
     event_loop: Option<PyObject>,
 ) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
+    metrics::init("0.0.0.0:9898".parse().unwrap());
     let len: usize = shape.iter().product();
     let buf = MmapBuf::new(shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let state = Shared::new(buf);
@@ -290,7 +292,8 @@ fn start(
         let st_clone = state.clone();
         let rx_clone = rx.clone();
         let pm = pending_meta.clone();
-        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm));
+        let monitor = metrics::monitor("server");
+        RUNTIME.spawn(monitor.instrument(serve(listen_addr, rx_clone, st_clone, pm)));
     }
 
     if let Some(addr) = server {
@@ -308,7 +311,8 @@ fn start(
         let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
         let ver_clone = version.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub));
+        let monitor = metrics::monitor("client");
+        RUNTIME.spawn(monitor.instrument(client(server_addr, st_clone, named_clone, mq, ver_clone, sub)));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
