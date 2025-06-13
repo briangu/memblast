@@ -30,9 +30,7 @@ struct Node {
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
-    meta_queue: Arc<Mutex<Vec<String>>>,
     pending_meta: Arc<Mutex<Option<String>>>,
-    callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
     version: Arc<AtomicU64>,
 }
@@ -119,21 +117,6 @@ impl Node {
         Ok(())
     }
 
-    fn on_update(&self, cb: PyObject) {
-        *self.callback.borrow_mut() = Some(cb);
-    }
-
-    fn process_meta(&self, py: Python<'_>) -> PyResult<()> {
-        if let Some(cb) = self.callback.borrow().as_ref() {
-            let loads = PyModule::import(py, "json")?.getattr("loads")?;
-            let mut q = self.meta_queue.lock().unwrap();
-            for item in q.drain(..) {
-                let obj = loads.call1((item,))?;
-                cb.call1(py, (obj,))?;
-            }
-        }
-        Ok(())
-    }
 
     fn write<'py>(slf: PyRef<'py, Self>) -> PyResult<WriteGuard> {
         slf.state.start_write().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -142,7 +125,6 @@ impl Node {
 
     fn read<'py>(slf: PyRef<'py, Self>) -> PyResult<ReadGuard> {
         let py = slf.py();
-        slf.process_meta(py)?;
         let node_ref: Py<Node> = unsafe { Py::from_borrowed_ptr(py, slf.as_ptr()) };
         let mut scratch = slf.scratch.borrow_mut();
         if scratch.len() != slf.len {
@@ -242,7 +224,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None, check_hash=false, block=true))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, event_loop=None, check_hash=false))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -251,10 +233,8 @@ fn start(
     shape: Option<Vec<usize>>,
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
     on_update: Option<PyObject>,
-    on_update_async: Option<PyObject>,
     event_loop: Option<PyObject>,
     check_hash: bool,
-    block: bool,
 ) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
@@ -323,75 +303,58 @@ fn start(
         shape,
         len,
         scratch: RefCell::new(vec![0.0; len]),
-        meta_queue: meta_queue.clone(),
         pending_meta: pending_meta.clone(),
-        callback: RefCell::new(None),
         named: named_arc.clone(),
         version: version.clone(),
     })?;
 
     if let Some(cb) = on_update {
-        node.as_ref(py).call_method1("on_update", (cb,))?;
-        if on_update_async.is_none() && event_loop.is_none() {
-            let node_clone = node.clone();
-            if block {
-                loop {
-                    Python::with_gil(|py| -> PyResult<()> {
-                        py.check_signals()?;
-                        let cell = node_clone.as_ref(py).borrow();
-                        cell.process_meta(py)
-                    })?;
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
+        let mq = meta_queue.clone();
+        let node_clone = node.clone();
+
+        let loop_obj = Python::with_gil(|py| -> PyResult<PyObject> {
+            let loop_obj: PyObject = if let Some(ref obj) = event_loop {
+                obj.clone_ref(py)
             } else {
-                std::thread::spawn(move || {
-                    loop {
-                        Python::with_gil(|py| {
-                            let cell = node_clone.as_ref(py).borrow();
-                            let _ = cell.process_meta(py);
-                        });
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                });
-            }
-        } else {
-            let node_clone = node.clone();
+                let asyncio = py.import("asyncio")?;
+                let loop_any = asyncio.call_method0("new_event_loop")?;
+                asyncio.call_method1("set_event_loop", (loop_any,))?;
+                loop_any.into()
+            };
+
+            let cb_ref = cb.clone_ref(py);
+            let loop_clone = loop_obj.clone_ref(py);
             std::thread::spawn(move || {
                 loop {
-                    Python::with_gil(|py| {
-                        let cell = node_clone.as_ref(py).borrow();
-                        let _ = cell.process_meta(py);
-                    });
+                    let metas = {
+                        let mut q = mq.lock().unwrap();
+                        if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) }
+                    };
+                    if let Some(items) = metas {
+                        Python::with_gil(|py| {
+                            let loads = py.import("json").unwrap().getattr("loads").unwrap();
+                            for m in items {
+                                let obj = loads.call1((m,)).unwrap();
+                                let coro = cb_ref.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                                py.import("asyncio").unwrap()
+                                    .call_method1("run_coroutine_threadsafe", (coro, loop_clone.as_ref(py)))
+                                    .unwrap();
+                            }
+                        });
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             });
-        }
-    }
 
-    if let (Some(cb), Some(loop_obj)) = (on_update_async, event_loop) {
-        let mq = meta_queue.clone();
-        let node_clone = node.clone();
-        std::thread::spawn(move || {
-            loop {
-                let metas = {
-                    let mut q = mq.lock().unwrap();
-                    if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) }
-                };
-                if let Some(items) = metas {
-                    Python::with_gil(|py| {
-                        let loads = py.import("json").unwrap().getattr("loads").unwrap();
-                        for m in items {
-                            let obj = loads.call1((m,)).unwrap();
-                            let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
-                            py.import("asyncio").unwrap()
-                                .call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py)))
-                                .unwrap();
-                        }
-                    });
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        });
+            Ok(loop_obj)
+        })?;
+
+        if event_loop.is_none() {
+            Python::with_gil(|py| -> PyResult<()> {
+                loop_obj.as_ref(py).call_method0("run_forever")?;
+                Ok(())
+            })?;
+        }
     }
 
     Ok(node)

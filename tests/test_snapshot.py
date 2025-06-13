@@ -1,4 +1,6 @@
 import time
+import asyncio
+import threading
 import memblast
 
 
@@ -11,10 +13,16 @@ def test_snapshot_on_connect():
 
     meta = {}
 
-    def cb(d):
+    async def cb(node, d):
         meta.update(d)
 
-    node_b = memblast.start("b", server="127.0.0.1:7200", shape=[2], on_update=cb, block=False)
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever)
+    t.start()
+
+    node_b = memblast.start(
+        "b", server="127.0.0.1:7200", shape=[2], on_update=cb, event_loop=loop
+    )
     node_a.send_meta({"last_index": 1})
     node_a.flush(0)
     # allow time for snapshot to transfer
@@ -23,6 +31,10 @@ def test_snapshot_on_connect():
         assert arr[0] == 1.5
         assert arr[1] == 2.5
     assert meta.get("last_index") == 1
+
+    loop.call_soon_threadsafe(loop.stop)
+    t.join()
+    loop.close()
 
 
 

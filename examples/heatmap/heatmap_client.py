@@ -31,7 +31,7 @@ async def main() -> None:
     loop   = asyncio.get_running_loop()
     stop   = asyncio.Event()
 
-    memblast.start('heatmap_client', server=args.server, shape=[size, size], on_update_async=handle_update, event_loop=loop)
+    memblast.start('heatmap_client', server=args.server, shape=[size, size], on_update=handle_update, event_loop=loop)
 
     def _arm_shutdown(sig: signal.Signals):
         loop.create_task(_shutdown(sig))
