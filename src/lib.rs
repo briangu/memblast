@@ -1,5 +1,6 @@
 mod memory;
 mod net;
+mod snapshot;
 
 use memory::{MmapBuf, Shared};
 use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
@@ -17,6 +18,7 @@ use tokio::runtime::Runtime;
 use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
 use libc::{PROT_READ};
+use snapshot::{SnapshotManager, UpdateDiff};
 use std::collections::HashMap;
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
@@ -34,7 +36,9 @@ struct Node {
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
-    version: AtomicU64,
+    version: Arc<AtomicU64>,
+    server_addr: Option<SocketAddr>,
+    snapshot: Option<SnapshotManager>,
 }
 
 #[pymethods]
@@ -97,15 +101,25 @@ impl Node {
             return;
         }
         let updates: Vec<Update> = ranges
-            .into_iter()
+            .iter()
             .map(|(s, e)| {
                 let len = e - s + 1;
-                Update { start: s as u32, len: len as u32 }
+                Update { start: *s as u32, len: len as u32 }
             })
             .collect();
+        let diffs = ranges
+            .iter()
+            .map(|(s, e)| {
+                let vals = scratch[*s..=*e].to_vec();
+                UpdateDiff { start: *s, values: vals }
+            })
+            .collect::<Vec<_>>();
         let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
         let packet = UpdatePacket { updates, meta, version };
         let _ = self.tx.try_send(packet);
+        if let Some(sm) = &self.snapshot {
+            sm.add_updates(version, diffs);
+        }
     }
 
     fn send_meta(&self, meta: &PyAny) -> PyResult<()> {
@@ -147,6 +161,31 @@ impl Node {
         slf.state.read_snapshot(&mut scratch);
         let data = std::mem::take(&mut *scratch);
         Ok(ReadGuard { node: node_ref, arr: Some(data) })
+    }
+
+    fn get_version(&self, version: u64) -> PyResult<Option<Vec<f64>>> {
+        if let Some(sm) = &self.snapshot {
+            if let Some(addr) = self.server_addr {
+                let res = RUNTIME.block_on(net::request_version(addr, version))
+                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                if let Some(ref b) = res {
+                    sm.add_snapshot(version, b.clone());
+                }
+                return Ok(res);
+            } else {
+                return Ok(sm.get(version));
+            }
+        }
+        Ok(None)
+    }
+
+    fn take_snapshot(&self) {
+        if let Some(sm) = &self.snapshot {
+            let mut buf = vec![0.0; self.len];
+            self.state.read_snapshot(&mut buf);
+            let version = self.version.load(Ordering::SeqCst);
+            sm.add_snapshot(version, buf);
+        }
     }
 }
 
@@ -238,7 +277,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None, snapshots=false))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -249,6 +288,7 @@ fn start(
     on_update: Option<PyObject>,
     on_update_async: Option<PyObject>,
     event_loop: Option<PyObject>,
+    snapshots: bool,
 ) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
@@ -258,6 +298,8 @@ fn start(
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
     let mut named_map: HashMap<String, Shared> = HashMap::new();
+    let snapshot_mgr = if snapshots { Some(SnapshotManager::new()) } else { None };
+    let version = Arc::new(AtomicU64::new(0));
     let subscription: Option<Vec<Mapping>> = if let Some(v) = maps {
         let mut out = Vec::new();
         for (srv_start, region_shape, client_start, name) in v {
@@ -279,18 +321,22 @@ fn start(
     } else { None };
     let named_arc = Arc::new(named_map);
 
+    let server_addr_parsed: Option<SocketAddr> = if let Some(addr) = server {
+        Some(addr.parse().map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?)
+    } else { None };
+
     if let Some(addr) = listen {
         let listen_addr: SocketAddr = addr.parse()
             .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
         let st_clone = state.clone();
         let rx_clone = rx.clone();
         let pm = pending_meta.clone();
-        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm));
+        let ver = version.clone();
+        let snap = snapshot_mgr.clone();
+        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm, ver, snap));
     }
 
-    if let Some(addr) = server {
-        let server_addr: SocketAddr = addr.parse()
-            .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
+    if let Some(server_addr) = server_addr_parsed {
         let st_clone = state.clone();
         let mq = meta_queue.clone();
         let sub_maps = subscription.clone().unwrap_or_else(|| {
@@ -302,7 +348,8 @@ fn start(
         });
         let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub));
+        let snap = snapshot_mgr.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, sub, snap));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -319,7 +366,9 @@ fn start(
         pending_meta: pending_meta.clone(),
         callback: RefCell::new(None),
         named: named_arc.clone(),
-        version: AtomicU64::new(0),
+        version: version.clone(),
+        server_addr: server_addr_parsed,
+        snapshot: snapshot_mgr.clone(),
     })?;
 
     if let Some(cb) = on_update {

@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::memory::Shared;
 
+const MSG_SUBSCRIPTION: u8 = 1;
+const MSG_VERSION_REQUEST: u8 = 2;
+
 
 #[derive(Debug, Clone)]
 pub struct Update {
@@ -127,12 +130,16 @@ async fn read_exact_checked(sock: &mut TcpStream, buf: &mut [u8]) -> Result<bool
     }
 }
 
-async fn read_subscription(sock: &mut TcpStream) -> Result<Option<Subscription>> {
-    let mut typ = [0u8; 1];
-    if !read_exact_checked(sock, &mut typ).await? {
+async fn read_message_type(sock: &mut TcpStream) -> Result<Option<u8>> {
+    let mut buf = [0u8; 1];
+    if !read_exact_checked(sock, &mut buf).await? {
         return Ok(None);
     }
-    if typ[0] != 1u8 {
+    Ok(Some(buf[0]))
+}
+
+async fn read_subscription(sock: &mut TcpStream, first: u8) -> Result<Option<Subscription>> {
+    if first != MSG_SUBSCRIPTION {
         return Ok(None);
     }
 
@@ -435,6 +442,7 @@ pub async fn handle_peer(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    snapshot: Option<crate::snapshot::SnapshotManager>,
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
@@ -447,7 +455,23 @@ pub async fn handle_peer(
             Some(v) => v,
             None => break,
         };
-        let (_version, updates, metadata) = packet;
+        let (version, updates, metadata) = packet;
+        if let Some(sm) = &snapshot {
+            let diffs = updates
+                .iter()
+                .map(|(_, start_idx, vals, _)| crate::snapshot::UpdateDiff {
+                    start: *start_idx,
+                    values: vals.clone(),
+                })
+                .collect::<Vec<_>>();
+            if version == 0 {
+                let mut buf = vec![0.0; len];
+                state.read_snapshot(&mut buf);
+                sm.add_snapshot(0, buf);
+            } else {
+                sm.add_updates(version, diffs);
+            }
+        }
         for (shape, start_idx, vals, name) in updates {
             if shape == local_shape && name.is_none() {
                 apply_update(&state, start_idx, &vals, len)?;
@@ -477,6 +501,8 @@ pub async fn serve(
     rx: async_channel::Receiver<UpdatePacket>,
     state: Shared,
     pending_meta: Arc<Mutex<Option<String>>>,
+    version: Arc<std::sync::atomic::AtomicU64>,
+    snapshot: Option<crate::snapshot::SnapshotManager>,
 ) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
@@ -485,15 +511,33 @@ pub async fn serve(
         tokio::select! {
             res = lst.accept() => {
                 let (mut sock, peer) = res?;
-                if let Some(sub) = read_subscription(&mut sock).await? {
+                let msg = match read_message_type(&mut sock).await? { Some(v) => v, None => continue };
+                if let Some(sub) = read_subscription(&mut sock, msg).await? {
                     println!("accepted connection from {} named {}", peer, sub.name);
                     let snap = snapshot_update(&state);
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
                     let meta = pending_meta.lock().unwrap().clone();
-                    let data = filtered_to_bytes(&filtered, &meta, 0);
+                    let ver = version.load(std::sync::atomic::Ordering::SeqCst);
+                    let data = filtered_to_bytes(&filtered, &meta, ver);
                     if sock.write_all(&data).await.is_ok() {
                         conns.push((sock, sub));
+                    }
+                } else if msg == MSG_VERSION_REQUEST {
+                    let mut buf = [0u8;8];
+                    if !read_exact_checked(&mut sock, &mut buf).await? { continue; }
+                    let ver = u64::from_le_bytes(buf);
+                    let resp = if let Some(sm) = &snapshot {
+                        sm.get(ver)
+                    } else { None };
+                    if let Some(data) = resp {
+                        let len = data.len() as u32;
+                        let mut out = Vec::with_capacity(4 + data.len()*8);
+                        out.extend_from_slice(&len.to_le_bytes());
+                        for v in data { out.extend_from_slice(&v.to_le_bytes()); }
+                        let _ = sock.write_all(&out).await;
+                    } else {
+                        let _ = sock.write_all(&0u32.to_le_bytes()).await;
                     }
                 }
             }
@@ -526,6 +570,7 @@ pub async fn client(
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
     sub: Subscription,
+    snapshot: Option<crate::snapshot::SnapshotManager>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
     loop {
@@ -537,7 +582,7 @@ pub async fn client(
                 if sock.write_all(&data).await.is_err() {
                     continue;
                 }
-                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone()).await;
+                let res = handle_peer(sock, state.clone(), named.clone(), meta.clone(), snapshot.clone()).await;
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }
@@ -546,5 +591,24 @@ pub async fn client(
         }
         interval.tick().await;
     }
+}
+
+pub async fn request_version(addr: SocketAddr, version: u64) -> Result<Option<Vec<f64>>> {
+    let mut sock = TcpStream::connect(addr).await?;
+    sock.write_all(&[MSG_VERSION_REQUEST]).await?;
+    sock.write_all(&version.to_le_bytes()).await?;
+    let mut len_buf = [0u8;4];
+    if !read_exact_checked(&mut sock, &mut len_buf).await? { return Ok(None); }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len == 0 { return Ok(None); }
+    let mut buf = vec![0u8; len * 8];
+    if !read_exact_checked(&mut sock, &mut buf).await? { return Ok(None); }
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let mut b = [0u8;8];
+        b.copy_from_slice(&buf[i*8..(i+1)*8]);
+        out.push(f64::from_le_bytes(b));
+    }
+    Ok(Some(out))
 }
 
