@@ -1,6 +1,7 @@
 # memblast
 
-This project exposes a small Raft-backed shared memory buffer as a Python extension module.
+`memblast` is a high-performance publish/subscribe ticker plant built around a shared memory buffer.
+Updates are replicated across nodes and exposed as NumPy arrays for lightning-fast Python access.
 
 ### Features
 
