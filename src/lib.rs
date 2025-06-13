@@ -1,8 +1,11 @@
 mod memory;
 mod net;
+mod rdma;
 
 use memory::{MmapBuf, Shared};
-use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
+use net::{Update, UpdatePacket, Subscription, Mapping};
+use net::{client as tcp_client, serve as tcp_serve};
+use rdma::{client as rdma_client, serve as rdma_serve};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
@@ -242,7 +245,7 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None))]
+#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update=None, on_update_async=None, event_loop=None, backend="tcp"))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -253,6 +256,7 @@ fn start(
     on_update: Option<PyObject>,
     on_update_async: Option<PyObject>,
     event_loop: Option<PyObject>,
+    backend: &str,
 ) -> PyResult<Py<Node>> {
     let shape = shape.unwrap_or_else(|| vec![10]);
     let len: usize = shape.iter().product();
@@ -290,7 +294,10 @@ fn start(
         let st_clone = state.clone();
         let rx_clone = rx.clone();
         let pm = pending_meta.clone();
-        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm));
+        match backend {
+            "rdma" => RUNTIME.spawn(rdma_serve(listen_addr, rx_clone, st_clone, pm)),
+            _ => RUNTIME.spawn(tcp_serve(listen_addr, rx_clone, st_clone, pm)),
+        };
     }
 
     if let Some(addr) = server {
@@ -308,12 +315,15 @@ fn start(
         let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps };
         let named_clone = named_arc.clone();
         let ver_clone = version.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub));
+        match backend {
+            "rdma" => RUNTIME.spawn(rdma_client(server_addr, st_clone, named_clone, mq, ver_clone, sub)),
+            _ => RUNTIME.spawn(tcp_client(server_addr, st_clone, named_clone, mq, ver_clone, sub)),
+        };
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-    println!("node {} running with listen={:?} server={:?} shape {:?}", name, listen, server, shape);
+    println!("node {} running with listen={:?} server={:?} shape {:?} backend {}", name, listen, server, shape, backend);
     let node = Py::new(py, Node {
         state,
         tx,
