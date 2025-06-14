@@ -44,3 +44,10 @@ registers the shared array with DuckDB. This mirrors the approach described in
 ## Neural network broadcast example
 
 The [nn_weights/](nn_weights/) folder trains a small neural network on the XOR problem with PyTorch and streams the weights as raw bytes so clients can map them directly for inference.
+
+## Snapshot MVCC example
+
+The [snapshots/](snapshots/) folder demonstrates multi-version
+concurrency control. The server records a snapshot after each update
+and the DuckDB client retrieves two versions to compare their means.
+
