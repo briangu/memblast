@@ -55,6 +55,22 @@ The `examples/life` directory runs a 256×256 Conway game of life. Start the ser
 with `python examples/life/life_server.py` and connect using
 `python examples/life/life_client.py`. Pass `--region` to the client to view a
 sub-region of the world.
+
+For a peer-to-peer setup where each process owns a portion of the array and
+receives updates for the rest, use `examples/peer_split.py`. Start one peer
+with `--name a` and the other with `--name b` to split a single buffer between
+them.  Each node starts a listener and then calls `connect()` to subscribe to
+its counterpart:
+
+```bash
+python examples/peer_split.py --name a
+python examples/peer_split.py --name b
+```
+
+Nodes can join other peers dynamically with `node.connect("addr", maps=...)`.
+This spawns an additional subscription client while continuing to publish
+updates from the local region.
+
 ## Running the tests
 
 Ensure your virtual environment is active and the module is built as described

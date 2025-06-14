@@ -461,7 +461,7 @@ fn filter_updates(
 pub async fn handle_peer(
     mut sock: TcpStream,
     state: Shared,
-    named: Arc<HashMap<String, Shared>>,
+    named: Arc<Mutex<HashMap<String, Shared>>>,
     meta: Arc<Mutex<Vec<String>>>,
     version: Arc<AtomicU64>,
     hash_check: bool,
@@ -476,7 +476,7 @@ pub async fn handle_peer(
             if shape == local_shape && name.is_none() {
                 Some(state.clone())
             } else if let Some(nm) = name {
-                named_map.get(nm).cloned()
+                named_map.lock().unwrap().get(nm).cloned()
             } else {
                 println!("shape mismatch: recv {:?} local {:?}", shape, local_shape);
                 None
@@ -558,7 +558,7 @@ pub async fn serve(
 pub async fn client(
     server: SocketAddr,
     state: Shared,
-    named: Arc<HashMap<String, Shared>>,
+    named: Arc<Mutex<HashMap<String, Shared>>>,
     meta: Arc<Mutex<Vec<String>>>,
     version: Arc<AtomicU64>,
     sub: Subscription,

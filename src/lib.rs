@@ -33,7 +33,7 @@ struct Node {
     meta_queue: Arc<Mutex<Vec<String>>>,
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
-    named: Arc<HashMap<String, Shared>>,
+    named: Arc<Mutex<HashMap<String, Shared>>>,
     version: Arc<AtomicU64>,
 }
 
@@ -44,14 +44,17 @@ impl Node {
         self.version.load(Ordering::SeqCst)
     }
     fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
-        let (ptr, shape) = if let Some(n) = name {
-            let shared = self.named.get(n)?;
-            (shared.mm.ptr(), shared.shape())
+        let (ptr, shape_vec) = if let Some(n) = name {
+            let shared = {
+                let map = self.named.lock().unwrap();
+                map.get(n)?.clone()
+            };
+            (shared.mm.ptr(), shared.shape().to_vec())
         } else {
-            (self.state.mm.ptr(), self.shape.as_slice())
+            (self.state.mm.ptr(), self.shape.clone())
         };
 
-        let len: usize = shape.iter().product();
+        let len: usize = shape_vec.iter().product();
         let dims: [npy_intp; 1] = [len as npy_intp];
         let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
         unsafe {
@@ -151,6 +154,51 @@ impl Node {
         slf.state.read_snapshot(&mut scratch);
         let data = std::mem::take(&mut *scratch);
         Ok(ReadGuard { node: node_ref, arr: Some(data) })
+    }
+
+    #[pyo3(signature=(server, maps=None, check_hash=false))]
+    fn connect(&self, server: &str, maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>, check_hash: bool) -> PyResult<()> {
+        let server_addr: SocketAddr = server.parse()
+            .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
+
+        let sub_maps = if let Some(v) = maps {
+            let mut out = Vec::new();
+            for (srv_start, region_shape, client_start, name) in v {
+                let ss_u32: Vec<u32> = srv_start.iter().map(|&d| d as u32).collect();
+                let sh_u32: Vec<u32> = region_shape.iter().map(|&d| d as u32).collect();
+                let target = if let Some(nm) = name {
+                    let buf = MmapBuf::new(region_shape.clone()).map_err(|e| PyValueError::new_err(e.to_string()))?;
+                    let shared = Shared::new(buf);
+                    self.named.lock().unwrap().insert(nm.clone(), shared);
+                    net::Target::Named(nm)
+                } else {
+                    let cs = client_start.unwrap_or_else(|| vec![0; srv_start.len()]);
+                    let cs_u32: Vec<u32> = cs.iter().map(|&d| d as u32).collect();
+                    net::Target::Region(cs_u32)
+                };
+                out.push(Mapping { server_start: ss_u32, shape: sh_u32, target });
+            }
+            out
+        } else {
+            vec![Mapping {
+                server_start: vec![0u32; self.shape.len()],
+                shape: self.shape.iter().map(|&d| d as u32).collect(),
+                target: net::Target::Region(vec![0u32; self.shape.len()])
+            }]
+        };
+
+        let sub = Subscription {
+            name: self.name.clone(),
+            client_shape: self.shape.iter().map(|&d| d as u32).collect(),
+            maps: sub_maps,
+            hash_check: check_hash,
+        };
+        let st_clone = self.state.clone();
+        let mq = self.meta_queue.clone();
+        let named_clone = self.named.clone();
+        let ver_clone = self.version.clone();
+        RUNTIME.spawn(net::client(server_addr, st_clone, named_clone, mq, ver_clone, sub));
+        Ok(())
     }
 }
 
@@ -282,7 +330,7 @@ fn start(
         }
         Some(out)
     } else { None };
-    let named_arc = Arc::new(named_map);
+    let named_arc = Arc::new(Mutex::new(named_map));
 
     if let Some(addr) = listen {
         let listen_addr: SocketAddr = addr.parse()
