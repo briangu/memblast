@@ -57,6 +57,7 @@ stock tickers and the clients compute rolling statistics.
 There is also a Yahoo Finance example under `examples/yfinance` that pulls
 real data using the `yfinance` library and demonstrates querying the live
 buffer with DuckDB. See `examples/yfinance/README.md` for details.
+An MVCC example under `examples/snapshots` shows how to compare the means of two snapshots with DuckDB.
 
 Run the ticker server:
 ```bash
