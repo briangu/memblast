@@ -55,6 +55,20 @@ The `examples/life` directory runs a 256×256 Conway game of life. Start the ser
 with `python examples/life/life_server.py` and connect using
 `python examples/life/life_client.py`. Pass `--region` to the client to view a
 sub-region of the world.
+
+For a peer-to-peer setup where each process owns a portion of the array and
+receives updates for the rest, use `examples/peer_split.py`. The script uses the
+`servers` parameter to connect to other peers while listening for incoming
+connections. Launch four peers (`a` through `d`) to divide the buffer into
+quadrants:
+
+```bash
+python examples/peer_split.py --name a
+python examples/peer_split.py --name b
+python examples/peer_split.py --name c
+python examples/peer_split.py --name d
+```
+
 ## Running the tests
 
 Ensure your virtual environment is active and the module is built as described
