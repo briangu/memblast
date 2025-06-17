@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use serde_json::json;
 
 use crate::memory::Shared;
 
@@ -42,6 +43,22 @@ pub struct Subscription {
     pub client_shape: Vec<u32>,
     pub maps: Vec<Mapping>,
     pub hash_check: bool,
+}
+
+fn sub_to_json(sub: &Subscription) -> String {
+    let maps: Vec<_> = sub.maps.iter().map(|m| {
+        let tgt = match &m.target {
+            Target::Region(cs) => json!({"region": cs}),
+            Target::Named(n) => json!({"named": n}),
+        };
+        json!({"server_start": m.server_start, "shape": m.shape, "target": tgt})
+    }).collect();
+    serde_json::to_string(&json!({
+        "name": sub.name,
+        "client_shape": sub.client_shape,
+        "maps": maps,
+        "hash_check": sub.hash_check
+    })).unwrap()
 }
 
 
@@ -507,6 +524,8 @@ pub async fn serve(
     rx: async_channel::Receiver<UpdatePacket>,
     state: Shared,
     pending_meta: Arc<Mutex<Option<String>>>,
+    connect_queue: Arc<Mutex<Vec<String>>>,
+    disconnect_queue: Arc<Mutex<Vec<String>>>,
 ) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
@@ -517,6 +536,7 @@ pub async fn serve(
                 let (mut sock, peer) = res?;
                 if let Some(sub) = read_subscription(&mut sock).await? {
                     println!("accepted connection from {} named {}", peer, sub.name);
+                    connect_queue.lock().unwrap().push(sub_to_json(&sub));
                     let snap = snapshot_update(&state);
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
@@ -545,7 +565,10 @@ pub async fn serve(
                     let data = filtered_to_bytes(&filtered, &u.meta, u.version, hash_ref);
                     match s.write_all(&data).await {
                         Ok(_) => alive.push((s, sub)),
-                        Err(e) => println!("send failed: {}", e),
+                        Err(e) => {
+                            println!("send failed: {}", e);
+                            disconnect_queue.lock().unwrap().push(sub_to_json(&sub));
+                        }
                     }
                 }
                 conns = alive;
@@ -561,6 +584,8 @@ pub async fn client(
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
     version: Arc<AtomicU64>,
+    connect_queue: Arc<Mutex<Vec<String>>>,
+    disconnect_queue: Arc<Mutex<Vec<String>>>,
     sub: Subscription,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
@@ -569,6 +594,7 @@ pub async fn client(
         match TcpStream::connect(server).await {
             Ok(mut sock) => {
                 println!("connected to {}", server);
+                connect_queue.lock().unwrap().push(json!({"server": server.to_string()}).to_string());
                 let data = subscription_to_bytes(&sub);
                 if sock.write_all(&data).await.is_err() {
                     continue;
@@ -584,6 +610,7 @@ pub async fn client(
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }
+                disconnect_queue.lock().unwrap().push(json!({"server": server.to_string()}).to_string());
             }
             Err(e) => println!("failed to connect to {}: {}", server, e),
         }

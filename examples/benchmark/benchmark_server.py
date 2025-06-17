@@ -24,13 +24,13 @@ for idx, size in enumerate(sizes):
     node = memblast.start(f'bench_server_{size}', listen=listen, shape=[size, size])
     nodes.append(node)
 
-    # wait for a client to signal readiness before beginning updates
+    # wait for on_connect callback
     ready = False
-    def meta_cb(m):
+    def conn_cb(info):
         nonlocal ready
-        if m.get('ready'):
-            ready = True
-    node.on_update(meta_cb)
+        print('client subscribed:', info)
+        ready = True
+    node.on_connect(conn_cb)
     print(f'waiting for client on {listen} (size {size})...')
     while not ready:
         # read processes incoming metadata

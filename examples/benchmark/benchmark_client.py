@@ -34,9 +34,8 @@ for idx, size in enumerate(sizes):
         meta.update(m)
     node.on_update(handle)
 
-    # signal the server that this client is ready
-    node.send_meta({'ready': True})
-    node.flush(0)
+    node.on_connect(lambda info: print('connected to server', info))
+    node.on_disconnect(lambda info: print('disconnected from server', info))
 
     start_ver = node.version
     start = time.perf_counter()

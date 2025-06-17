@@ -51,8 +51,8 @@ The [heatmap/](heatmap/) folder streams a dynamic sine-wave heatmap. Clients ren
 ## Benchmark example
 
 The [benchmark/](benchmark/) directory measures update throughput for different
-matrix sizes. Start the benchmark server first – it waits for a client to signal
-readiness before running – then start the client. Both scripts accept a comma
+matrix sizes. Start the benchmark server first; it begins sending updates when a
+client subscribes via the `on_connect` callback. Both scripts accept a comma
 separated list of sizes and the number of updates to send for each size:
 
 ```bash
