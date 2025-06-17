@@ -122,7 +122,11 @@ impl Node {
         let _ = self.tx.try_send(packet);
     }
 
-    fn send_meta(&self, meta: &PyAny) -> PyResult<()> {
+    fn version_meta(&self, meta: &PyAny) -> PyResult<()> {
+        // ensure we are currently in a write block by checking the sequence
+        if self.state.seq.load(Ordering::Acquire) % 2 == 0 {
+            return Err(PyRuntimeError::new_err("meta updates require an active write block"));
+        }
         let py = meta.py();
         let json = PyModule::import(py, "json")?.call_method1("dumps", (meta,))?.extract::<String>()?;
         *self.pending_meta.lock().unwrap() = Some(json);

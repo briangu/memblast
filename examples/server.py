@@ -18,7 +18,7 @@ while True:
             idx = random.randrange(len(a))
             a[idx] = random.random()
             last = idx
-        node.send_meta({"last_index": last})
+        node.version_meta({"last_index": last})
     with node.read() as arr:
         print("\033[H\033[J", end="")
         print(f"version: {node.version.get(node.name, 0)}")
