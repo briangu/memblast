@@ -32,7 +32,7 @@ coords = {
 }
 
 start = coords[args.name]
-maps = [ (c, [half, half], c, None) for p, c in coords.items() if p != args.name ]
+maps = [ (coord, [half, half], coord, None) for peer, coord in coords.items() if peer != args.name ]
 
 node = memblast.start(
     f'peer_{args.name}',
@@ -47,8 +47,8 @@ while True:
     with node.write() as arr:
         val = float((index % 100) + ordinal * 100)
         for r in range(half):
-            for c in range(half):
-                idx = (start[0] + r) * dim + start[1] + c
+            for col in range(half):
+                idx = (start[0] + r) * dim + start[1] + col
                 arr[idx] = val
         node.send_meta({'index': index})
     with node.read() as arr:
