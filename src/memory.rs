@@ -68,7 +68,19 @@ impl Shared {
     }
 
     pub fn start_write(&self) -> Result<()> {
-        self.seq.fetch_add(1, Ordering::AcqRel);
+        loop {
+            let cur = self.seq.load(Ordering::Acquire);
+            if cur % 2 == 1 {
+                std::hint::spin_loop();
+                continue;
+            }
+            match self.seq.compare_exchange(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(_) => {
+                    std::hint::spin_loop();
+                }
+            }
+        }
         self.protect(PROT_READ | PROT_WRITE)
     }
 
