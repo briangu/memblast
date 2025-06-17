@@ -33,6 +33,7 @@ struct Node {
     scratch: RefCell<Vec<f64>>,
     meta_queue: Arc<Mutex<Vec<String>>>,
     pending_meta: Arc<Mutex<Option<String>>>,
+    meta_once: Arc<AtomicBool>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
     version: Arc<AtomicU64>,
@@ -98,7 +99,14 @@ impl Node {
         if let Some(s) = start {
             ranges.push((s, end));
         }
-        let meta = self.pending_meta.lock().unwrap().clone();
+        let meta = {
+            let mut pm = self.pending_meta.lock().unwrap();
+            let m = pm.clone();
+            if self.meta_once.swap(false, Ordering::SeqCst) {
+                *pm = None;
+            }
+            m
+        };
         if ranges.is_empty() && meta.is_none() {
             return;
         }
@@ -118,6 +126,15 @@ impl Node {
         let py = meta.py();
         let json = PyModule::import(py, "json")?.call_method1("dumps", (meta,))?.extract::<String>()?;
         *self.pending_meta.lock().unwrap() = Some(json);
+        self.meta_once.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn version_meta(&self, meta: &PyAny) -> PyResult<()> {
+        let py = meta.py();
+        let json = PyModule::import(py, "json")?.call_method1("dumps", (meta,))?.extract::<String>()?;
+        *self.pending_meta.lock().unwrap() = Some(json);
+        self.meta_once.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -353,6 +370,7 @@ fn start(
         scratch: RefCell::new(vec![0.0; len]),
         meta_queue: meta_queue.clone(),
         pending_meta: pending_meta.clone(),
+        meta_once: Arc::new(AtomicBool::new(false)),
         callback: RefCell::new(None),
         named: named_arc.clone(),
         version: version.clone(),

@@ -57,15 +57,7 @@ async def run():
     )
 
     results = []
-    for size in sizes:
-        start_ver = node.version
-        start = time.perf_counter()
-        while node.version - start_ver < args.updates:
-            with node.read():
-                pass
-            await asyncio.sleep(0.001)
-        client_time = time.perf_counter() - start
-
+    while True:
         msg = None
         while not msg:
             with node.read():
@@ -73,18 +65,23 @@ async def run():
                     msg = meta.copy()
                     meta.clear()
             await asyncio.sleep(0.01)
-        server_time = msg["server_time"]
         exp = msg["experiment"]
-        results.append((exp, server_time, client_time))
-        print(f"{exp}: server {server_time:.4f}s client {client_time:.4f}s")
+        start_ver = node.version
+        start = time.perf_counter()
+        while node.version - start_ver < args.updates:
+            with node.read():
+                pass
+            await asyncio.sleep(0.001)
+        elapsed = time.perf_counter() - start
+        results.append((exp, elapsed))
+        print(f"{exp}: {args.updates / elapsed:.2f} updates/sec")
         if msg.get("done"):
             break
         await asyncio.sleep(0.5)
 
     print("Results:")
-    for exp, st, ct in results:
-        rate = args.updates / max(st, ct)
-        print(f"  {exp}: {rate:.2f} updates/sec")
+    for exp, ct in results:
+        print(f"  {exp}: {args.updates / ct:.2f} updates/sec")
 
 
 asyncio.run(run())

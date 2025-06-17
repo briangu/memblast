@@ -45,22 +45,19 @@ async def run():
 
     for idx, size in enumerate(sizes):
         start = time.perf_counter()
-        for _ in range(args.updates):
+        for i in range(args.updates):
+            vals = np.random.random(size) if args.named else np.random.random((size, size))
             with node.write() as arr:
+                node.version_meta({
+                    "experiment": f"{size}x{size}",
+                    "done": i == args.updates - 1 and idx == len(sizes) - 1,
+                })
                 arr = arr.reshape(max_size, max_size)
                 if args.named:
-                    arr[0, :size] = np.random.random(size)
+                    arr[0, :size] = vals
                 else:
-                    arr[:size, :size] = np.random.random((size, size))
+                    arr[:size, :size] = vals
         elapsed = time.perf_counter() - start
-        meta = {
-            "experiment": f"{size}x{size}",
-            "server_time": elapsed,
-        }
-        if idx == len(sizes) - 1:
-            meta["done"] = True
-        node.send_meta(meta)
-        node.flush(0)
         print(f"{size}x{size}: {args.updates / elapsed:.2f} updates/sec")
         await asyncio.sleep(1)
 
