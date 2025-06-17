@@ -34,6 +34,10 @@ for idx, size in enumerate(sizes):
         meta.update(m)
     node.on_update(handle)
 
+    # signal the server that this client is ready
+    node.send_meta({'ready': True})
+    node.flush(0)
+
     start_ver = node.version
     start = time.perf_counter()
     while node.version - start_ver < args.updates:
