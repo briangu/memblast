@@ -51,7 +51,7 @@ while True:
         val = float((index + ordinal) % 4)
         view = arr.reshape(dim, dim)
         view[start[0]:start[0]+half, start[1]:start[1]+half] = val
-        node.send_meta({'index': index})
+        node.version_meta({'index': index})
     with node.read() as arr:
         print("\033[H\033[J", end="")
         print(f'peer {args.name} version: {node.version}')

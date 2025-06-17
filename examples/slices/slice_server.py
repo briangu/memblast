@@ -18,7 +18,7 @@ while True:
         arr = arr.reshape(args.tickers, args.window)
         for i in range(args.tickers):
             arr[i, index % args.window] = random.uniform(100.0, 200.0)
-        node.send_meta({'index': index})
+        node.version_meta({'index': index})
     index += 1
     with node.read() as data:
         data = data.reshape(args.tickers, args.window)

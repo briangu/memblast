@@ -22,7 +22,7 @@ while True:
         if index < window:
             for i in range(len(tickers)):
                 arr[i, index] = random.uniform(100.0, 200.0)
-        node.send_meta({'index': index})
+        node.version_meta({'index': index})
     with node.read() as data:
         data = data.reshape(len(tickers), window)
         print("\033[H\033[J", end="")
