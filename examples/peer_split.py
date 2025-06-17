@@ -54,7 +54,7 @@ while True:
         node.send_meta({'index': index})
     with node.read() as arr:
         print("\033[H\033[J", end="")
-        print(f'peer {args.name} version: {node.version}')
+        print(f'peer {args.name} versions: {node.version}')
         view = arr.reshape(dim, dim)
         for r in range(dim):
             row_vals = view[r]
