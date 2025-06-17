@@ -242,12 +242,13 @@ impl ReadGuard {
 }
 
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, shape=None, maps=None, on_update_async=None, event_loop=None, check_hash=false))]
+#[pyo3(signature = (name, listen=None, server=None, servers=None, shape=None, maps=None, on_update_async=None, event_loop=None, check_hash=false))]
 fn start(
     py: Python<'_>,
     name: &str,
     listen: Option<&str>,
     server: Option<&str>,
+    servers: Option<Vec<String>>,
     shape: Option<Vec<usize>>,
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
     on_update_async: Option<PyObject>,
@@ -293,7 +294,9 @@ fn start(
         RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm));
     }
 
-    if let Some(addr) = server {
+    let mut peer_addrs: Vec<String> = servers.clone().unwrap_or_default();
+    if let Some(addr) = server { peer_addrs.push(addr.to_string()); }
+    for addr in peer_addrs {
         let server_addr: SocketAddr = addr.parse()
             .map_err(|e: std::net::AddrParseError| PyValueError::new_err(e.to_string()))?;
         let st_clone = state.clone();
@@ -305,15 +308,21 @@ fn start(
                 target: net::Target::Region(vec![0u32; shape.len()])
             }]
         });
-        let sub = Subscription { name: name.to_string(), client_shape: shape.iter().map(|&d| d as u32).collect(), maps: sub_maps, hash_check: check_hash };
+        let sub = Subscription {
+            name: name.to_string(),
+            client_shape: shape.iter().map(|&d| d as u32).collect(),
+            maps: sub_maps,
+            hash_check: check_hash,
+        };
         let named_clone = named_arc.clone();
         let ver_clone = version.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub));
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub.clone()));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-    println!("node {} running with listen={:?} server={:?} shape {:?}", name, listen, server, shape);
+    println!("node {} running with listen={:?} server={:?} servers={:?} shape {:?}",
+        name, listen, server, servers, shape);
     let node = Py::new(py, Node {
         state,
         tx,
