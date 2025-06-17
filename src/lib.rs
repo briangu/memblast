@@ -18,6 +18,7 @@ use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
 use libc::{PROT_READ};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 
@@ -35,6 +36,7 @@ struct Node {
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
     version: Arc<AtomicU64>,
+    shutdown: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -152,6 +154,14 @@ impl Node {
         let data = std::mem::take(&mut *scratch);
         Ok(ReadGuard { node: node_ref, arr: Some(data) })
     }
+
+    fn close(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    fn __del__(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
 }
 
 fn flush_now(node: &Node) {
@@ -265,6 +275,7 @@ fn start(
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
     let connect_queue = Arc::new(Mutex::new(Vec::new()));
     let disconnect_queue = Arc::new(Mutex::new(Vec::new()));
+    let shutdown = Arc::new(AtomicBool::new(false));
     let pending_meta = Arc::new(Mutex::new(None));
     let version = Arc::new(AtomicU64::new(0));
     let mut named_map: HashMap<String, Shared> = HashMap::new();
@@ -297,7 +308,8 @@ fn start(
         let pm = pending_meta.clone();
         let cq = connect_queue.clone();
         let dq = disconnect_queue.clone();
-        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm, cq, dq));
+        let sd = shutdown.clone();
+        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm, cq, dq, sd));
     }
 
     let mut peer_addrs: Vec<String> = servers.clone().unwrap_or_default();
@@ -324,7 +336,8 @@ fn start(
         let ver_clone = version.clone();
         let cq = connect_queue.clone();
         let dq = disconnect_queue.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, cq, dq, sub.clone()));
+        let sd = shutdown.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, cq, dq, sub.clone(), sd));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -343,6 +356,7 @@ fn start(
         callback: RefCell::new(None),
         named: named_arc.clone(),
         version: version.clone(),
+        shutdown: shutdown.clone(),
     })?;
 
     if on_update_async.is_some() || on_connect_async.is_some() || on_disconnect_async.is_some() {
@@ -354,8 +368,12 @@ fn start(
             let cb_u = on_update_async.as_ref().map(|c| c.clone_ref(py));
             let cb_c = on_connect_async.as_ref().map(|c| c.clone_ref(py));
             let cb_d = on_disconnect_async.as_ref().map(|c| c.clone_ref(py));
+            let sd = shutdown.clone();
             std::thread::spawn(move || {
                 loop {
+                    if sd.load(Ordering::SeqCst) {
+                        break;
+                    }
                     let metas = { let mut q = mq.lock().unwrap(); if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) } };
                     let conns = { let mut q = cq.lock().unwrap(); if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) } };
                     let disconns = { let mut q = dq.lock().unwrap(); if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) } };
@@ -386,8 +404,10 @@ fn start(
             let cb_c = on_connect_async.as_ref().map(|c| c.clone_ref(py));
             let cb_d = on_disconnect_async.as_ref().map(|c| c.clone_ref(py));
             let loop_clone = new_loop.clone_ref(py);
+            let sd = shutdown.clone();
             std::thread::spawn(move || {
                 loop {
+                    if sd.load(Ordering::SeqCst) { break; }
                     let metas = { let mut q = mq.lock().unwrap(); if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) } };
                     let conns = { let mut q = cq.lock().unwrap(); if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) } };
                     let disconns = { let mut q = dq.lock().unwrap(); if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) } };

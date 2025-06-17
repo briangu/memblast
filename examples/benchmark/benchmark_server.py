@@ -68,5 +68,7 @@ async def run():
     nodes[-1].send_meta({'done': True})
     nodes[-1].flush(0)
     print('Benchmark complete.')
+    for n in nodes:
+        n.close()
 
 asyncio.run(run())

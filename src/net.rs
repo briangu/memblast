@@ -5,7 +5,7 @@ use tokio::time::{self, Duration};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering, AtomicBool}};
 use serde_json::json;
 
 use crate::memory::Shared;
@@ -526,11 +526,15 @@ pub async fn serve(
     pending_meta: Arc<Mutex<Option<String>>>,
     connect_queue: Arc<Mutex<Vec<String>>>,
     disconnect_queue: Arc<Mutex<Vec<String>>>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     let mut conns: Vec<(TcpStream, Subscription)> = Vec::new();
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         tokio::select! {
             res = lst.accept() => {
                 let (mut sock, peer) = res?;
@@ -573,6 +577,7 @@ pub async fn serve(
                 }
                 conns = alive;
             }
+            _ = time::sleep(Duration::from_millis(50)) => {}
         }
     }
     Ok(())
@@ -587,9 +592,13 @@ pub async fn client(
     connect_queue: Arc<Mutex<Vec<String>>>,
     disconnect_queue: Arc<Mutex<Vec<String>>>,
     sub: Subscription,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         println!("connecting to server {}", server);
         match TcpStream::connect(server).await {
             Ok(mut sock) => {
@@ -616,5 +625,6 @@ pub async fn client(
         }
         interval.tick().await;
     }
+    Ok(())
 }
 

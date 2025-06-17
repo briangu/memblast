@@ -23,6 +23,7 @@ async def run():
     loop = asyncio.get_running_loop()
 
     results = []
+    nodes = []
 
     for idx, size in enumerate(sizes):
         port = base_port + idx
@@ -61,6 +62,7 @@ async def run():
                 event_loop=loop,
             )
 
+        nodes.append(node)
         start_ver = node.version
         start = time.perf_counter()
         while node.version - start_ver < args.updates:
@@ -82,5 +84,7 @@ async def run():
     for size, st, ct in results:
         rate = args.updates / max(st, ct)
         print(f'  {size}x{size}: {rate:.2f} updates/sec')
+    for n in nodes:
+        n.close()
 
 asyncio.run(run())
