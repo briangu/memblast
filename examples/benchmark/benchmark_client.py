@@ -2,6 +2,7 @@ import argparse
 import time
 import memblast
 
+
 parser = argparse.ArgumentParser(description="Memblast benchmark client")
 parser.add_argument('--server', default='0.0.0.0:7040',
                     help='Base host:port of the benchmark server')
@@ -21,21 +22,38 @@ results = []
 
 for idx, size in enumerate(sizes):
     port = base_port + idx
-    if args.named:
-        maps = [([0, 0], [1, size], [0, 0], 'row0')]
-        node = memblast.start(f'bench_client_{size}', server=f'{host}:{port}',
-                              shape=[1, size], maps=maps)
-    else:
-        node = memblast.start(f'bench_client_{size}', server=f'{host}:{port}',
-                              shape=[size, size])
 
     meta = {}
-    def handle(m):
-        meta.update(m)
-    node.on_update(handle)
 
-    node.on_connect(lambda info: print('connected to server', info))
-    node.on_disconnect(lambda info: print('disconnected from server', info))
+    async def handle_update(node, m):
+        meta.update(m)
+
+    async def handle_connect(node, info):
+        print('connected to server', info)
+
+    async def handle_disconnect(node, info):
+        print('disconnected from server', info)
+
+    if args.named:
+        maps = [([0, 0], [1, size], [0, 0], 'row0')]
+        node = memblast.start(
+            f'bench_client_{size}',
+            server=f'{host}:{port}',
+            shape=[1, size],
+            maps=maps,
+            on_update_async=handle_update,
+            on_connect_async=handle_connect,
+            on_disconnect_async=handle_disconnect,
+        )
+    else:
+        node = memblast.start(
+            f'bench_client_{size}',
+            server=f'{host}:{port}',
+            shape=[size, size],
+            on_update_async=handle_update,
+            on_connect_async=handle_connect,
+            on_disconnect_async=handle_disconnect,
+        )
 
     start_ver = node.version
     start = time.perf_counter()

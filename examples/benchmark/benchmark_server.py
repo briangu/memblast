@@ -21,19 +21,28 @@ base_port = int(base_port)
 nodes = []
 for idx, size in enumerate(sizes):
     listen = f"{host}:{base_port + idx}"
-    node = memblast.start(f'bench_server_{size}', listen=listen, shape=[size, size])
-    nodes.append(node)
 
-    # wait for on_connect callback
     ready = False
-    def conn_cb(info):
+
+    async def conn_cb(node, info):
         nonlocal ready
         print('client subscribed:', info)
         ready = True
-    node.on_connect(conn_cb)
+
+    async def disc_cb(node, info):
+        print('client disconnected:', info)
+
+    node = memblast.start(
+        f'bench_server_{size}',
+        listen=listen,
+        shape=[size, size],
+        on_connect_async=conn_cb,
+        on_disconnect_async=disc_cb,
+    )
+    nodes.append(node)
+
     print(f'waiting for client on {listen} (size {size})...')
     while not ready:
-        # read processes incoming metadata
         with node.read():
             pass
         time.sleep(0.1)

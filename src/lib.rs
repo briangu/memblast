@@ -31,12 +31,8 @@ struct Node {
     len: usize,
     scratch: RefCell<Vec<f64>>,
     meta_queue: Arc<Mutex<Vec<String>>>,
-    connect_queue: Arc<Mutex<Vec<String>>>,
-    disconnect_queue: Arc<Mutex<Vec<String>>>,
     pending_meta: Arc<Mutex<Option<String>>>,
     callback: RefCell<Option<Py<PyAny>>>,
-    connect_cb: RefCell<Option<Py<PyAny>>>,
-    disconnect_cb: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
     version: Arc<AtomicU64>,
 }
@@ -127,34 +123,10 @@ impl Node {
         *self.callback.borrow_mut() = Some(cb);
     }
 
-    fn on_connect(&self, cb: PyObject) {
-        *self.connect_cb.borrow_mut() = Some(cb);
-    }
-
-    fn on_disconnect(&self, cb: PyObject) {
-        *self.disconnect_cb.borrow_mut() = Some(cb);
-    }
-
     fn process_meta(&self, py: Python<'_>) -> PyResult<()> {
         if let Some(cb) = self.callback.borrow().as_ref() {
             let loads = PyModule::import(py, "json")?.getattr("loads")?;
             let mut q = self.meta_queue.lock().unwrap();
-            for item in q.drain(..) {
-                let obj = loads.call1((item,))?;
-                cb.call1(py, (obj,))?;
-            }
-        }
-        if let Some(cb) = self.connect_cb.borrow().as_ref() {
-            let loads = PyModule::import(py, "json")?.getattr("loads")?;
-            let mut q = self.connect_queue.lock().unwrap();
-            for item in q.drain(..) {
-                let obj = loads.call1((item,))?;
-                cb.call1(py, (obj,))?;
-            }
-        }
-        if let Some(cb) = self.disconnect_cb.borrow().as_ref() {
-            let loads = PyModule::import(py, "json")?.getattr("loads")?;
-            let mut q = self.disconnect_queue.lock().unwrap();
             for item in q.drain(..) {
                 let obj = loads.call1((item,))?;
                 cb.call1(py, (obj,))?;
@@ -367,12 +339,8 @@ fn start(
         len,
         scratch: RefCell::new(vec![0.0; len]),
         meta_queue: meta_queue.clone(),
-        connect_queue: connect_queue.clone(),
-        disconnect_queue: disconnect_queue.clone(),
         pending_meta: pending_meta.clone(),
         callback: RefCell::new(None),
-        connect_cb: RefCell::new(None),
-        disconnect_cb: RefCell::new(None),
         named: named_arc.clone(),
         version: version.clone(),
     })?;
