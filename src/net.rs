@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering, AtomicBool}};
-use serde_json::json;
 
 use crate::memory::Shared;
 
@@ -45,20 +44,46 @@ pub struct Subscription {
     pub hash_check: bool,
 }
 
+fn vec_to_json(v: &[u32]) -> String {
+    let mut out = String::from("[");
+    for (i, n) in v.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&n.to_string());
+    }
+    out.push(']');
+    out
+}
+
 fn sub_to_json(sub: &Subscription) -> String {
-    let maps: Vec<_> = sub.maps.iter().map(|m| {
-        let tgt = match &m.target {
-            Target::Region(cs) => json!({"region": cs}),
-            Target::Named(n) => json!({"named": n}),
-        };
-        json!({"server_start": m.server_start, "shape": m.shape, "target": tgt})
-    }).collect();
-    serde_json::to_string(&json!({
-        "name": sub.name,
-        "client_shape": sub.client_shape,
-        "maps": maps,
-        "hash_check": sub.hash_check
-    })).unwrap()
+    let mut out = String::from("{\"name\":\"");
+    out.push_str(&sub.name);
+    out.push_str("\",\"client_shape\":");
+    out.push_str(&vec_to_json(&sub.client_shape));
+    out.push_str(",\"maps\":[");
+    for (i, m) in sub.maps.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str("{\"server_start\":");
+        out.push_str(&vec_to_json(&m.server_start));
+        out.push_str(",\"shape\":");
+        out.push_str(&vec_to_json(&m.shape));
+        out.push_str(",\"target\":{");
+        match &m.target {
+            Target::Region(cs) => {
+                out.push_str("\"region\":");
+                out.push_str(&vec_to_json(cs));
+            }
+            Target::Named(n) => {
+                out.push_str("\"named\":\"");
+                out.push_str(n);
+                out.push('"');
+            }
+        }
+        out.push_str("}}");
+    }
+    out.push_str("],\"hash_check\":");
+    out.push_str(if sub.hash_check { "true" } else { "false" });
+    out.push('}');
+    out
 }
 
 
@@ -603,7 +628,7 @@ pub async fn client(
         match TcpStream::connect(server).await {
             Ok(mut sock) => {
                 println!("connected to {}", server);
-                connect_queue.lock().unwrap().push(json!({"server": server.to_string()}).to_string());
+                connect_queue.lock().unwrap().push(format!("{{\"server\":\"{}\"}}", server));
                 let data = subscription_to_bytes(&sub);
                 if sock.write_all(&data).await.is_err() {
                     continue;
@@ -619,7 +644,7 @@ pub async fn client(
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }
-                disconnect_queue.lock().unwrap().push(json!({"server": server.to_string()}).to_string());
+                disconnect_queue.lock().unwrap().push(format!("{{\"server\":\"{}\"}}", server));
             }
             Err(e) => println!("failed to connect to {}: {}", server, e),
         }
