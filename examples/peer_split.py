@@ -54,7 +54,8 @@ while True:
         node.version_meta({'index': index})
     with node.read() as arr:
         print("\033[H\033[J", end="")
-        print(f'peer {args.name} version: {node.version}')
+        version_str = ' '.join(f'{k}={v}' for k, v in node.version.items())
+        print(f'peer {args.name} versions: {version_str}')
         view = arr.reshape(dim, dim)
         for r in range(dim):
             row_vals = view[r]
