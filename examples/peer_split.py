@@ -45,7 +45,10 @@ node = memblast.start(
 index = 0
 while True:
     with node.write() as arr:
-        val = float((index % 100) + ordinal * 100)
+        # Each peer writes a unique value based on its ordinal and the
+        # current loop counter. Using modulus keeps the numbers small
+        # so changes between updates are visible.
+        val = float((index + ordinal) % 4)
         view = arr.reshape(dim, dim)
         view[start[0]:start[0]+half, start[1]:start[1]+half] = val
         node.send_meta({'index': index})

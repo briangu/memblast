@@ -59,8 +59,9 @@ sub-region of the world.
 For a peer-to-peer setup where each process owns a portion of the array and
 receives updates for the rest, use `examples/peer_split.py`. The script uses the
 `servers` parameter to connect to other peers while listening for incoming
-connections. Launch four peers (`a` through `d`) to divide the buffer into
-quadrants:
+connections. Each peer writes a running counter modulo 4 into its quadrant so
+the origin of each region is visible. Launch four peers (`a` through `d`) to
+divide the buffer into quadrants:
 
 ```bash
 python examples/peer_split.py --name a
