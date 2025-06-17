@@ -53,8 +53,8 @@ The [heatmap/](heatmap/) folder streams a dynamic sine-wave heatmap. Clients ren
 The [benchmark/](benchmark/) directory measures update throughput for different
 matrix sizes. Start the benchmark server first; it begins sending updates when a
 client subscribes via the async `on_connect` callback set in `memblast.start()`.
-Both scripts accept a comma
-separated list of sizes and the number of updates to send for each size:
+Both scripts accept a comma-separated list of sizes and the number of updates to
+send for each size. The server reuses the same port for each size sequentially:
 
 ```bash
 python examples/benchmark/benchmark_server.py --listen 0.0.0.0:7040 --sizes 128,256 --updates 1000

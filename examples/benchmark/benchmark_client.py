@@ -6,7 +6,7 @@ import memblast
 
 parser = argparse.ArgumentParser(description="Memblast benchmark client")
 parser.add_argument('--server', default='0.0.0.0:7040',
-                    help='Base host:port of the benchmark server')
+                    help='Host:port of the benchmark server')
 parser.add_argument('--sizes', default='64,128,256',
                     help='Comma separated matrix sizes (NxN)')
 parser.add_argument('--updates', type=int, default=1000,
@@ -16,17 +16,14 @@ parser.add_argument('--named', action='store_true',
 args = parser.parse_args()
 
 sizes = [int(s) for s in args.sizes.split(',') if s]
-host, base_port = args.server.split(':')
-base_port = int(base_port)
+server = args.server
 
 async def run():
     loop = asyncio.get_running_loop()
 
     results = []
-    nodes = []
 
     for idx, size in enumerate(sizes):
-        port = base_port + idx
 
         meta = {}
 
@@ -43,7 +40,7 @@ async def run():
             maps = [([0, 0], [1, size], [0, 0], 'row0')]
             node = memblast.start(
                 f'bench_client_{size}',
-                server=f'{host}:{port}',
+                server=server,
                 shape=[1, size],
                 maps=maps,
                 on_update_async=handle_update,
@@ -54,7 +51,7 @@ async def run():
         else:
             node = memblast.start(
                 f'bench_client_{size}',
-                server=f'{host}:{port}',
+                server=server,
                 shape=[size, size],
                 on_update_async=handle_update,
                 on_connect_async=handle_connect,
@@ -62,7 +59,6 @@ async def run():
                 event_loop=loop,
             )
 
-        nodes.append(node)
         start_ver = node.version
         start = time.perf_counter()
         while node.version - start_ver < args.updates:
@@ -77,14 +73,14 @@ async def run():
         results.append((size, server_time, client_time))
         print(f'size {size}: server {server_time:.4f}s client {client_time:.4f}s')
         if meta.get('done'):
+            node.close()
             break
         await asyncio.sleep(0.5)
+        node.close()
 
     print('Results:')
     for size, st, ct in results:
         rate = args.updates / max(st, ct)
         print(f'  {size}x{size}: {rate:.2f} updates/sec')
-    for n in nodes:
-        n.close()
 
 asyncio.run(run())
