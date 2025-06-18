@@ -47,3 +47,19 @@ The [nn_weights/](nn_weights/) folder trains a small neural network on the XOR p
 
 The [heatmap/](heatmap/) folder streams a dynamic sine-wave heatmap. Clients render it as ASCII art.
 
+
+## Benchmark example
+
+The [benchmark/](benchmark/) directory measures update throughput for different
+matrix sizes. Start the server and then run the client. The client subscribes to
+all sizes over a single connection and the server runs each benchmark
+sequentially, publishing its experiment name through metadata. Both scripts
+accept a comma-separated list of sizes and the number of updates to send for
+each size:
+
+```bash
+python examples/benchmark/benchmark_server.py --listen 0.0.0.0:7040 --sizes 128,256 --updates 1000
+python examples/benchmark/benchmark_client.py --server 0.0.0.0:7040 --sizes 128,256 --updates 1000
+```
+
+Pass `--named` to benchmark updates on a named slice instead of the full matrix.

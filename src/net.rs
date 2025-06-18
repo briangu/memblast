@@ -5,7 +5,7 @@ use tokio::time::{self, Duration};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering, AtomicBool}};
 
 use crate::memory::Shared;
 
@@ -42,6 +42,48 @@ pub struct Subscription {
     pub client_shape: Vec<u32>,
     pub maps: Vec<Mapping>,
     pub hash_check: bool,
+}
+
+fn vec_to_json(v: &[u32]) -> String {
+    let mut out = String::from("[");
+    for (i, n) in v.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str(&n.to_string());
+    }
+    out.push(']');
+    out
+}
+
+fn sub_to_json(sub: &Subscription) -> String {
+    let mut out = String::from("{\"name\":\"");
+    out.push_str(&sub.name);
+    out.push_str("\",\"client_shape\":");
+    out.push_str(&vec_to_json(&sub.client_shape));
+    out.push_str(",\"maps\":[");
+    for (i, m) in sub.maps.iter().enumerate() {
+        if i > 0 { out.push(','); }
+        out.push_str("{\"server_start\":");
+        out.push_str(&vec_to_json(&m.server_start));
+        out.push_str(",\"shape\":");
+        out.push_str(&vec_to_json(&m.shape));
+        out.push_str(",\"target\":{");
+        match &m.target {
+            Target::Region(cs) => {
+                out.push_str("\"region\":");
+                out.push_str(&vec_to_json(cs));
+            }
+            Target::Named(n) => {
+                out.push_str("\"named\":\"");
+                out.push_str(n);
+                out.push('"');
+            }
+        }
+        out.push_str("}}");
+    }
+    out.push_str("],\"hash_check\":");
+    out.push_str(if sub.hash_check { "true" } else { "false" });
+    out.push('}');
+    out
 }
 
 
@@ -511,16 +553,23 @@ pub async fn serve(
     rx: async_channel::Receiver<UpdatePacket>,
     state: Shared,
     pending_meta: Arc<Mutex<Option<String>>>,
+    connect_queue: Arc<Mutex<Vec<String>>>,
+    disconnect_queue: Arc<Mutex<Vec<String>>>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     let mut conns: Vec<(TcpStream, Subscription)> = Vec::new();
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         tokio::select! {
             res = lst.accept() => {
                 let (mut sock, peer) = res?;
                 if let Some(sub) = read_subscription(&mut sock).await? {
                     println!("accepted connection from {} named {}", peer, sub.name);
+                    connect_queue.lock().unwrap().push(sub_to_json(&sub));
                     let snap = snapshot_update(&state);
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
@@ -549,11 +598,15 @@ pub async fn serve(
                     let data = filtered_to_bytes(&filtered, &u.meta, u.version, hash_ref);
                     match s.write_all(&data).await {
                         Ok(_) => alive.push((s, sub)),
-                        Err(e) => println!("send failed: {}", e),
+                        Err(e) => {
+                            println!("send failed: {}", e);
+                            disconnect_queue.lock().unwrap().push(sub_to_json(&sub));
+                        }
                     }
                 }
                 conns = alive;
             }
+            _ = time::sleep(Duration::from_millis(50)) => {}
         }
     }
     Ok(())
@@ -564,15 +617,23 @@ pub async fn client(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
+    _version: Arc<AtomicU64>,
     versions: Arc<Mutex<HashMap<String, u64>>>,
+    connect_queue: Arc<Mutex<Vec<String>>>,
+    disconnect_queue: Arc<Mutex<Vec<String>>>,
     sub: Subscription,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
         println!("connecting to server {}", server);
         match TcpStream::connect(server).await {
             Ok(mut sock) => {
                 println!("connected to {}", server);
+                connect_queue.lock().unwrap().push(format!("{{\"server\":\"{}\"}}", server));
                 let data = subscription_to_bytes(&sub);
                 if sock.write_all(&data).await.is_err() {
                     continue;
@@ -589,10 +650,12 @@ pub async fn client(
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
                 }
+                disconnect_queue.lock().unwrap().push(format!("{{\"server\":\"{}\"}}", server));
             }
             Err(e) => println!("failed to connect to {}: {}", server, e),
         }
         interval.tick().await;
     }
+    Ok(())
 }
 
