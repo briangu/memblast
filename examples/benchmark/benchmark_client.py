@@ -8,29 +8,12 @@ parser.add_argument(
     "--server", default="0.0.0.0:7040", help="Host:port of the benchmark server"
 )
 parser.add_argument(
-    "--sizes", default="64,128,256", help="Comma separated matrix sizes (NxN)"
+    "--size", default=256, type=int, help="Matrix size (NxN)"
 )
 parser.add_argument(
     "--updates", type=int, default=1000, help="Number of updates per matrix size"
 )
-parser.add_argument(
-    "--named",
-    action="store_true",
-    help="Subscribe to named slices instead of the full matrix",
-)
 args = parser.parse_args()
-
-sizes = [int(s) for s in args.sizes.split(",") if s]
-max_size = max(sizes)
-
-maps = []
-if args.named:
-    for size in sizes:
-        maps.append(([0, 0], [1, size], None, f"row0_{size}"))
-else:
-    for size in sizes:
-        maps.append(([0, 0], [size, size], None, f"exp_{size}"))
-
 
 async def run():
     loop = asyncio.get_running_loop()
@@ -48,8 +31,7 @@ async def run():
     node = memblast.start(
         "bench_client",
         server=args.server,
-        shape=[max_size, max_size],
-        maps=maps,
+        shape=[args.size, args.size],
         on_update_async=on_update,
         on_connect_async=on_connect,
         on_disconnect_async=on_disconnect,

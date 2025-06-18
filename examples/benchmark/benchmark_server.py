@@ -7,23 +7,14 @@ import memblast
 parser = argparse.ArgumentParser(description="Memblast benchmark server")
 parser.add_argument("--listen", default="0.0.0.0:7040", help="Host:port to listen on")
 parser.add_argument(
-    "--sizes", default="64,128,256", help="Comma separated matrix sizes (NxN)"
+    "--size", default="256", help="Matrix dimension (square)", type=int
 )
 parser.add_argument(
     "--updates", type=int, default=1000, help="Number of updates per matrix size"
 )
-parser.add_argument(
-    "--named",
-    action="store_true",
-    help="Update only a named slice instead of the full matrix",
-)
 args = parser.parse_args()
 
-sizes = [int(s) for s in args.sizes.split(",") if s]
-max_size = max(sizes)
-
-
-async def run():
+async def run(size: int):
     loop = asyncio.get_running_loop()
     ready = asyncio.Event()
 
@@ -34,7 +25,7 @@ async def run():
     node = memblast.start(
         "bench_server",
         listen=args.listen,
-        shape=[max_size, max_size],
+        shape=[size, size],
         on_connect_async=on_connect,
         event_loop=loop,
     )
@@ -43,26 +34,29 @@ async def run():
     await ready.wait()
     print("client connected - starting benchmarks")
 
-    for idx, size in enumerate(sizes):
-        start = time.perf_counter()
+    for idx, size in enumerate([size]):
+        total_time_s = 0
+        meta = {
+            "experiment": f"{size}x{size}",
+            "done": False,
+        }
         for i in range(args.updates):
-            vals = np.random.random(size) if args.named else np.random.random((size, size))
+            # random is expensive so do it outside the timer
+            vals = np.random.random((size, size))
+            start = time.perf_counter()
             with node.write() as arr:
-                node.version_meta({
-                    "experiment": f"{size}x{size}",
-                    "done": i == args.updates - 1 and idx == len(sizes) - 1,
-                })
-                arr = arr.reshape(max_size, max_size)
-                if args.named:
-                    arr[0, :size] = vals
-                else:
-                    arr[:size, :size] = vals
-        elapsed = time.perf_counter() - start
-        print(f"{size}x{size}: {args.updates / elapsed:.2f} updates/sec")
-        await asyncio.sleep(1)
+                node.version_meta(meta)
+                arr = arr.reshape(size, size)
+                arr[:size, :size] = vals
+            total_time_s += time.perf_counter() - start
+        # updates / second
+        print(f"{size}x{size}: {args.updates / total_time_s:.2f} updates/sec", end="")
+        total_bytes = size * size * 8
+        # bytes / second
+        print(f" {total_bytes / total_time_s / (2 ** 20):.2f} MB/s", end="\n")
 
     node.close()
     print("Benchmark complete.")
 
 
-asyncio.run(run())
+asyncio.run(run(args.size))
