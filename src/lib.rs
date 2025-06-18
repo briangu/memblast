@@ -36,13 +36,11 @@ struct Node {
     meta_once: Arc<AtomicBool>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
-<<<<<<< codex/add-client/server-benchmark-for-matrix-updates
-    version: Arc<AtomicU64>,
-    shutdown: Arc<AtomicBool>,
-=======
+    // Version tracking
     local_version: Arc<AtomicU64>,
     versions: Arc<Mutex<HashMap<String, u64>>>,
->>>>>>> main
+    // Shutdown flag shared with background tasks
+    shutdown: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -137,22 +135,17 @@ impl Node {
     }
 
     fn version_meta(&self, meta: &PyAny) -> PyResult<()> {
-        // ensure we are currently in a write block by checking the sequence
+        // Ensure we are currently in a write block by checking the sequence.
         if self.state.seq.load(Ordering::Acquire) % 2 == 0 {
             return Err(PyRuntimeError::new_err("meta updates require an active write block"));
         }
         let py = meta.py();
-        let json = PyModule::import(py, "json")?.call_method1("dumps", (meta,))?.extract::<String>()?;
+        let json = PyModule::import(py, "json")?
+            .call_method1("dumps", (meta,))?
+            .extract::<String>()?;
         *self.pending_meta.lock().unwrap() = Some(json);
+        // The meta message should only be sent once after the current write flush.
         self.meta_once.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn version_meta(&self, meta: &PyAny) -> PyResult<()> {
-        let py = meta.py();
-        let json = PyModule::import(py, "json")?.call_method1("dumps", (meta,))?.extract::<String>()?;
-        *self.pending_meta.lock().unwrap() = Some(json);
-        self.meta_once.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -370,16 +363,23 @@ fn start(
             hash_check: check_hash,
         };
         let named_clone = named_arc.clone();
-<<<<<<< codex/add-client/server-benchmark-for-matrix-updates
-        let ver_clone = version.clone();
+        let ver_clone = local_version.clone();
+        let vers_clone = versions.clone();
         let cq = connect_queue.clone();
         let dq = disconnect_queue.clone();
         let sd = shutdown.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, cq, dq, sub.clone(), sd));
-=======
-        let ver_clone = versions.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub.clone()));
->>>>>>> main
+        RUNTIME.spawn(client(
+            server_addr,
+            st_clone,
+            named_clone,
+            mq,
+            ver_clone,
+            vers_clone,
+            cq,
+            dq,
+            sub.clone(),
+            sd,
+        ));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -398,13 +398,9 @@ fn start(
         meta_once: Arc::new(AtomicBool::new(false)),
         callback: RefCell::new(None),
         named: named_arc.clone(),
-<<<<<<< codex/add-client/server-benchmark-for-matrix-updates
-        version: version.clone(),
-        shutdown: shutdown.clone(),
-=======
         local_version: local_version.clone(),
         versions: versions.clone(),
->>>>>>> main
+        shutdown: shutdown.clone(),
     })?;
 
     if on_update_async.is_some() || on_connect_async.is_some() || on_disconnect_async.is_some() {

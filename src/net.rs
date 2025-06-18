@@ -617,7 +617,7 @@ pub async fn client(
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
     meta: Arc<Mutex<Vec<String>>>,
-    version: Arc<AtomicU64>,
+    _version: Arc<AtomicU64>,
     versions: Arc<Mutex<HashMap<String, u64>>>,
     connect_queue: Arc<Mutex<Vec<String>>>,
     disconnect_queue: Arc<Mutex<Vec<String>>>,
