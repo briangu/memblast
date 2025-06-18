@@ -6,37 +6,39 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use serde::{Serialize, Deserialize};
+use bincode;
 
 use crate::memory::Shared;
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Update {
     pub start: u32,
     pub len: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePacket {
     pub updates: Vec<Update>,
     pub meta: Option<String>,
     pub version: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Target {
     Region(Vec<u32>),
     Named(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mapping {
     pub server_start: Vec<u32>,
     pub shape: Vec<u32>,
     pub target: Target,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
     pub name: String,
     pub client_shape: Vec<u32>,
@@ -46,81 +48,38 @@ pub struct Subscription {
 
 
 
-fn filtered_to_bytes(
-    updates: &[FilteredUpdate],
-    meta: &Option<String>,
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct WireUpdate {
     version: u64,
-    hash: Option<&[u8; 32]>,
-) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&version.to_le_bytes());
-    buf.extend_from_slice(&(updates.len() as u32).to_le_bytes());
-    for u in updates {
-        buf.extend_from_slice(&(u.shape.len() as u32).to_le_bytes());
-        for d in &u.shape {
-            buf.extend_from_slice(&d.to_le_bytes());
-        }
-        buf.extend_from_slice(&u.start.to_le_bytes());
-        buf.extend_from_slice(&(u.values.len() as u32).to_le_bytes());
-        if let Some(name) = &u.name {
-            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
-            buf.extend_from_slice(name.as_bytes());
-        } else {
-            buf.extend_from_slice(&(0u32.to_le_bytes()));
-        }
-        for v in &u.values {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    if let Some(meta) = meta {
-        let bytes = meta.as_bytes();
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(bytes);
-    } else {
-        buf.extend_from_slice(&(0u32.to_le_bytes()));
-    }
-    if let Some(h) = hash {
-        buf.extend_from_slice(h);
-    }
-    buf
+    updates: Vec<FilteredUpdate>,
+    meta: Option<String>,
+    hash: Option<[u8; 32]>,
 }
 
-pub fn subscription_to_bytes(sub: &Subscription) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.push(1u8); // message type 1 for subscription
-    buf.extend_from_slice(&(sub.name.len() as u32).to_le_bytes());
-    buf.extend_from_slice(sub.name.as_bytes());
-    buf.extend_from_slice(&(sub.client_shape.len() as u32).to_le_bytes());
-    for d in &sub.client_shape {
-        buf.extend_from_slice(&d.to_le_bytes());
+async fn send_message<T: Serialize>(sock: &mut TcpStream, msg: &T) -> Result<()> {
+    let data = bincode::serialize(msg)?;
+    sock.write_all(&(data.len() as u32).to_le_bytes()).await?;
+    sock.write_all(&data).await?;
+    Ok(())
+}
+
+async fn recv_message<T: for<'de> Deserialize<'de>>(sock: &mut TcpStream) -> Result<Option<T>> {
+    let mut len_buf = [0u8; 4];
+    if !read_exact_checked(sock, &mut len_buf).await? {
+        return Ok(None);
     }
-    buf.extend_from_slice(&(sub.maps.len() as u32).to_le_bytes());
-    for m in &sub.maps {
-        buf.extend_from_slice(&(m.server_start.len() as u32).to_le_bytes());
-        for v in &m.server_start {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        buf.extend_from_slice(&(m.shape.len() as u32).to_le_bytes());
-        for v in &m.shape {
-            buf.extend_from_slice(&v.to_le_bytes());
-        }
-        match &m.target {
-            Target::Region(cs) => {
-                buf.push(0u8);
-                buf.extend_from_slice(&(cs.len() as u32).to_le_bytes());
-                for v in cs {
-                    buf.extend_from_slice(&v.to_le_bytes());
-                }
-            }
-            Target::Named(name) => {
-                buf.push(1u8);
-                buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
-                buf.extend_from_slice(name.as_bytes());
-            }
-        }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    if !read_exact_checked(sock, &mut buf).await? {
+        return Ok(None);
     }
-    buf.push(if sub.hash_check { 1u8 } else { 0u8 });
-    buf
+    let msg = bincode::deserialize(&buf)?;
+    Ok(Some(msg))
+}
+
+async fn send_subscription(sock: &mut TcpStream, sub: &Subscription) -> Result<()> {
+    send_message(sock, sub).await
 }
 
 fn snapshot_update(state: &Shared) -> Update {
@@ -138,195 +97,18 @@ async fn read_exact_checked(sock: &mut TcpStream, buf: &mut [u8]) -> Result<bool
 }
 
 async fn read_subscription(sock: &mut TcpStream) -> Result<Option<Subscription>> {
-    let mut typ = [0u8; 1];
-    if !read_exact_checked(sock, &mut typ).await? {
-        return Ok(None);
-    }
-    if typ[0] != 1u8 {
-        return Ok(None);
-    }
-
-    let mut len_buf = [0u8; 4];
-    if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-    let name_len = u32::from_le_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; name_len];
-    if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
-    let name = String::from_utf8_lossy(&buf).to_string();
-
-    if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-    let shape_len = u32::from_le_bytes(len_buf) as usize;
-    let mut shape_bytes = vec![0u8; shape_len * 4];
-    if !read_exact_checked(sock, &mut shape_bytes).await? { return Ok(None); }
-    let mut shape = Vec::with_capacity(shape_len);
-    for i in 0..shape_len {
-        let mut d = [0u8;4];
-        d.copy_from_slice(&shape_bytes[i*4..(i+1)*4]);
-        shape.push(u32::from_le_bytes(d));
-    }
-    if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-    let map_len = u32::from_le_bytes(len_buf) as usize;
-    let mut maps = Vec::with_capacity(map_len);
-    for _ in 0..map_len {
-        if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-        let ss_len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; ss_len * 4];
-        if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
-        let mut server_start = Vec::with_capacity(ss_len);
-        for i in 0..ss_len {
-            let mut b = [0u8;4];
-            b.copy_from_slice(&buf[i*4..(i+1)*4]);
-            server_start.push(u32::from_le_bytes(b));
-        }
-
-        if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-        let sh_len = u32::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; sh_len * 4];
-        if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
-        let mut region_shape = Vec::with_capacity(sh_len);
-        for i in 0..sh_len {
-            let mut b = [0u8;4];
-            b.copy_from_slice(&buf[i*4..(i+1)*4]);
-            region_shape.push(u32::from_le_bytes(b));
-        }
-
-        let mut kind = [0u8;1];
-        if !read_exact_checked(sock, &mut kind).await? { return Ok(None); }
-        let target = if kind[0] == 0u8 {
-            if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-            let cs_len = u32::from_le_bytes(len_buf) as usize;
-            let mut buf = vec![0u8; cs_len * 4];
-            if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
-            let mut cs = Vec::with_capacity(cs_len);
-            for i in 0..cs_len {
-                let mut b = [0u8;4];
-                b.copy_from_slice(&buf[i*4..(i+1)*4]);
-                cs.push(u32::from_le_bytes(b));
-            }
-            Target::Region(cs)
-        } else {
-            if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-            let nlen = u32::from_le_bytes(len_buf) as usize;
-            let mut buf = vec![0u8; nlen];
-            if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
-            let name = String::from_utf8_lossy(&buf).to_string();
-            Target::Named(name)
-        };
-        maps.push(Mapping { server_start, shape: region_shape, target });
-    }
-    let mut flag = [0u8;1];
-    if !read_exact_checked(sock, &mut flag).await? { return Ok(None); }
-    let hash_check = flag[0] != 0u8;
-    Ok(Some(Subscription { name, client_shape: shape, maps, hash_check }))
+    recv_message(sock).await
 }
 
-async fn read_update_header(sock: &mut TcpStream) -> Result<Option<(Vec<usize>, usize, usize)>> {
-    let mut len_buf = [0u8; 4];
-    if !read_exact_checked(sock, &mut len_buf).await? {
-        return Ok(None);
-    }
-    let shape_len = u32::from_le_bytes(len_buf) as usize;
 
-    let mut shape_bytes = vec![0u8; shape_len * 4];
-    if !read_exact_checked(sock, &mut shape_bytes).await? {
-        return Ok(None);
-    }
-    let mut shape = Vec::with_capacity(shape_len);
-    for i in 0..shape_len {
-        let mut d = [0u8; 4];
-        d.copy_from_slice(&shape_bytes[i * 4..(i + 1) * 4]);
-        shape.push(u32::from_le_bytes(d) as usize);
-    }
-
-    if !read_exact_checked(sock, &mut len_buf).await? {
-        return Ok(None);
-    }
-    let start_idx = u32::from_le_bytes(len_buf) as usize;
-
-    if !read_exact_checked(sock, &mut len_buf).await? {
-        return Ok(None);
-    }
-    let val_len = u32::from_le_bytes(len_buf) as usize;
-
-    Ok(Some((shape, start_idx, val_len)))
+async fn read_update_set(sock: &mut TcpStream) -> Result<Option<WireUpdate>> {
+    recv_message(sock).await
 }
 
-async fn read_update_set<F>(
-    sock: &mut TcpStream,
-    with_hash: bool,
-    mut f: F,
-) -> Result<Option<(u64, Option<String>, Option<[u8; 32]>)>>
-where
-    F: FnMut(&[usize], Option<&str>) -> Option<Shared>,
-{
-    let mut len_buf = [0u8; 8];
-    if !read_exact_checked(sock, &mut len_buf).await? {
-        return Ok(None);
-    }
-    let version = u64::from_le_bytes(len_buf);
-    let mut len_buf = [0u8; 4];
-    if !read_exact_checked(sock, &mut len_buf).await? {
-        return Ok(None);
-    }
-    let count = u32::from_le_bytes(len_buf) as usize;
-    for _ in 0..count {
-        let (shape, start_idx, val_len) = match read_update_header(sock).await? {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        if !read_exact_checked(sock, &mut len_buf).await? { return Ok(None); }
-        let name_len = u32::from_le_bytes(len_buf) as usize;
-        let name = if name_len > 0 {
-            let mut buf = vec![0u8; name_len];
-            if !read_exact_checked(sock, &mut buf).await? { return Ok(None); }
-            Some(String::from_utf8_lossy(&buf).to_string())
-        } else { None };
-        if let Some(dst) = f(&shape, name.as_deref()) {
-            let l: usize = dst.shape().iter().product();
-            if !apply_update(sock, &dst, start_idx, l, val_len).await? { return Ok(None); }
-        } else {
-            for _ in 0..val_len {
-                let mut b = [0u8;8];
-                if !read_exact_checked(sock, &mut b).await? { return Ok(None); }
-            }
-        }
-    }
-    if !read_exact_checked(sock, &mut len_buf).await? {
-        return Ok(None);
-    }
-    let meta_len = u32::from_le_bytes(len_buf) as usize;
-    let meta = if meta_len > 0 {
-        let mut buf = vec![0u8; meta_len];
-        if !read_exact_checked(sock, &mut buf).await? {
-            return Ok(None);
-        }
-        Some(String::from_utf8_lossy(&buf).to_string())
-    } else {
-        None
-    };
-    let hash = if with_hash {
-        let mut h = [0u8;32];
-        if !read_exact_checked(sock, &mut h).await? { return Ok(None); }
-        Some(h)
-    } else { None };
-
-    Ok(Some((version, meta, hash)))
-}
-
-async fn apply_update(
-    sock: &mut TcpStream,
-    state: &Shared,
-    start_idx: usize,
-    len: usize,
-    val_len: usize,
-) -> Result<bool> {
+fn apply_update_values(state: &Shared, start_idx: usize, values: &[f64]) -> Result<()> {
+    let len: usize = state.shape().iter().product();
     state.start_write()?;
-    for i in 0..val_len {
-        let mut b = [0u8; 8];
-        if !read_exact_checked(sock, &mut b).await? {
-            state.end_write()?;
-            return Ok(false);
-        }
-        let v = f64::from_le_bytes(b);
+    for (i, &v) in values.iter().enumerate() {
         let idx = start_idx + i;
         if idx < len {
             let base = state.mm.mm.as_ptr() as *mut f64;
@@ -334,7 +116,7 @@ async fn apply_update(
         }
     }
     state.end_write()?;
-    Ok(true)
+    Ok(())
 }
 
 fn strides(shape: &[u32]) -> Vec<usize> {
@@ -396,6 +178,7 @@ fn compute_segments(
     segs
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct FilteredUpdate {
     shape: Vec<u32>,
     start: u32,
@@ -469,33 +252,36 @@ pub async fn handle_peer(
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
-    let local_shape = state.shape().to_vec();
+    let local_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
     let named_map = named.clone();
 
     loop {
-        let packet = match read_update_set(&mut sock, hash_check, |shape, name| {
-            if shape == local_shape && name.is_none() {
-                Some(state.clone())
-            } else if let Some(nm) = name {
-                named_map.get(nm).cloned()
-            } else {
-                println!("shape mismatch: recv {:?} local {:?}", shape, local_shape);
-                None
-            }
-        }).await? {
+        let packet = match read_update_set(&mut sock).await? {
             Some(v) => v,
             None => break,
         };
-        let (ver, metadata, hash) = packet;
         {
             let mut map = versions.lock().unwrap();
-            map.insert(peer_id.clone(), ver);
+            map.insert(peer_id.clone(), packet.version);
         }
-        if let Some(m) = metadata {
+        for upd in packet.updates {
+            let target = if upd.shape == local_shape && upd.name.is_none() {
+                Some(state.clone())
+            } else if let Some(ref nm) = upd.name {
+                named_map.get(nm).cloned()
+            } else {
+                println!("shape mismatch: recv {:?} local {:?}", upd.shape, local_shape);
+                None
+            };
+            if let Some(dst) = target {
+                apply_update_values(&dst, upd.start as usize, &upd.values)?;
+            }
+        }
+        if let Some(m) = packet.meta {
             let mut q = meta.lock().unwrap();
             q.push(m);
         }
-        if let (true, Some(h)) = (hash_check, hash) {
+        if let (true, Some(h)) = (hash_check, packet.hash) {
             let local = state.snapshot_hash();
             if h != local {
                 println!("hash mismatch from {:?}", addr);
@@ -526,8 +312,8 @@ pub async fn serve(
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
                     let meta = pending_meta.lock().unwrap().clone();
                     let snap_hash = if sub.hash_check { Some(state.snapshot_hash()) } else { None };
-                    let data = filtered_to_bytes(&filtered, &meta, 0, snap_hash.as_ref());
-                    if sock.write_all(&data).await.is_ok() {
+                    let wire = WireUpdate { version: 0, updates: filtered, meta, hash: snap_hash };
+                    if send_message(&mut sock, &wire).await.is_ok() {
                         conns.push((sock, sub));
                     }
                 }
@@ -546,8 +332,8 @@ pub async fn serve(
                         continue;
                     }
                     let hash_ref = if sub.hash_check { hash_val.as_ref() } else { None };
-                    let data = filtered_to_bytes(&filtered, &u.meta, u.version, hash_ref);
-                    match s.write_all(&data).await {
+                    let wire = WireUpdate { version: u.version, updates: filtered, meta: u.meta.clone(), hash: hash_ref.cloned() };
+                    match send_message(&mut s, &wire).await {
                         Ok(_) => alive.push((s, sub)),
                         Err(e) => println!("send failed: {}", e),
                     }
@@ -573,8 +359,7 @@ pub async fn client(
         match TcpStream::connect(server).await {
             Ok(mut sock) => {
                 println!("connected to {}", server);
-                let data = subscription_to_bytes(&sub);
-                if sock.write_all(&data).await.is_err() {
+                if send_subscription(&mut sock, &sub).await.is_err() {
                     continue;
                 }
                 let res = handle_peer(
