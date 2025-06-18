@@ -45,7 +45,7 @@ while True:
         arr = arr.reshape(len(tickers), window)
         for i, price in enumerate(prices):
             arr[i, index % window] = price
-        node.send_meta({'index': index})
+        node.version_meta({'index': index})
 
     with node.read() as arr:
         arr = np.array(arr).reshape(len(tickers), window)

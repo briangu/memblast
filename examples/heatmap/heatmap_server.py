@@ -22,7 +22,7 @@ while True:
     with node.write() as arr:
         arr = arr.reshape(size, size)
         arr[:] = data
-        node.send_meta({'phase': float(phase)})
+        node.version_meta({'phase': float(phase)})
     with node.read() as arr:
         arr = arr.reshape(size, size)
         print("\033[H\033[J", end="")

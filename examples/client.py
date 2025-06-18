@@ -7,7 +7,8 @@ async def handle_update(node, meta):
     print("metadata", meta)
     with node.read() as arr:
         print("\033[H\033[J", end="")
-        print(f"version: {node.version}")
+        remote = node.version.get(args.server, 0)
+        print(f"version: {remote}")
         print(arr)
         sys.stdout.flush()
 

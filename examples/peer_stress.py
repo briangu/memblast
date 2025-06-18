@@ -1,7 +1,5 @@
 import argparse
-import time
 import memblast
-import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--name', choices=['a', 'b', 'c', 'd'], required=True,
@@ -45,21 +43,8 @@ node = memblast.start(
 index = 0
 while True:
     with node.write() as arr:
-        # Each peer writes a unique value based on its ordinal and the
-        # current loop counter. Using modulus keeps the numbers small
-        # so changes between updates are visible.
         val = float((index + ordinal) % 4)
         view = arr.reshape(dim, dim)
         view[start[0]:start[0]+half, start[1]:start[1]+half] = val
         node.version_meta({'index': index})
-    with node.read() as arr:
-        print("\033[H\033[J", end="")
-        version_str = ' '.join(f'{k}={v}' for k, v in node.version.items())
-        print(f'peer {args.name} versions: {version_str}')
-        view = arr.reshape(dim, dim)
-        for r in range(dim):
-            row_vals = view[r]
-            print(' '.join(f'{v:5.1f}' for v in row_vals))
-        sys.stdout.flush()
     index += 1
-    time.sleep(1)

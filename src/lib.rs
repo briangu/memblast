@@ -6,7 +6,7 @@ use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyModule, PyDict};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
@@ -36,15 +36,25 @@ struct Node {
     meta_once: Arc<AtomicBool>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
+<<<<<<< codex/add-client/server-benchmark-for-matrix-updates
     version: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
+=======
+    local_version: Arc<AtomicU64>,
+    versions: Arc<Mutex<HashMap<String, u64>>>,
+>>>>>>> main
 }
 
 #[pymethods]
 impl Node {
     #[getter]
-    fn version(&self) -> u64 {
-        self.version.load(Ordering::SeqCst)
+    fn version<'py>(&self, py: Python<'py>) -> PyObject {
+        let dict = PyDict::new(py);
+        let versions = self.versions.lock().unwrap();
+        for (k, v) in versions.iter() {
+            dict.set_item(k, *v).unwrap();
+        }
+        dict.into()
     }
     fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
         let (ptr, shape) = if let Some(n) = name {
@@ -117,12 +127,20 @@ impl Node {
                 Update { start: s as u32, len: len as u32 }
             })
             .collect();
-        let version = self.version.fetch_add(1, Ordering::SeqCst) + 1;
+        let version = self.local_version.fetch_add(1, Ordering::SeqCst) + 1;
+        {
+            let mut map = self.versions.lock().unwrap();
+            map.insert(self.name.clone(), version);
+        }
         let packet = UpdatePacket { updates, meta, version };
         let _ = self.tx.try_send(packet);
     }
 
-    fn send_meta(&self, meta: &PyAny) -> PyResult<()> {
+    fn version_meta(&self, meta: &PyAny) -> PyResult<()> {
+        // ensure we are currently in a write block by checking the sequence
+        if self.state.seq.load(Ordering::Acquire) % 2 == 0 {
+            return Err(PyRuntimeError::new_err("meta updates require an active write block"));
+        }
         let py = meta.py();
         let json = PyModule::import(py, "json")?.call_method1("dumps", (meta,))?.extract::<String>()?;
         *self.pending_meta.lock().unwrap() = Some(json);
@@ -294,7 +312,9 @@ fn start(
     let disconnect_queue = Arc::new(Mutex::new(Vec::new()));
     let shutdown = Arc::new(AtomicBool::new(false));
     let pending_meta = Arc::new(Mutex::new(None));
-    let version = Arc::new(AtomicU64::new(0));
+    let local_version = Arc::new(AtomicU64::new(0));
+    let versions = Arc::new(Mutex::new(HashMap::new()));
+    versions.lock().unwrap().insert(name.to_string(), 0);
     let mut named_map: HashMap<String, Shared> = HashMap::new();
     let subscription: Option<Vec<Mapping>> = if let Some(v) = maps {
         let mut out = Vec::new();
@@ -350,11 +370,16 @@ fn start(
             hash_check: check_hash,
         };
         let named_clone = named_arc.clone();
+<<<<<<< codex/add-client/server-benchmark-for-matrix-updates
         let ver_clone = version.clone();
         let cq = connect_queue.clone();
         let dq = disconnect_queue.clone();
         let sd = shutdown.clone();
         RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, cq, dq, sub.clone(), sd));
+=======
+        let ver_clone = versions.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub.clone()));
+>>>>>>> main
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -373,8 +398,13 @@ fn start(
         meta_once: Arc::new(AtomicBool::new(false)),
         callback: RefCell::new(None),
         named: named_arc.clone(),
+<<<<<<< codex/add-client/server-benchmark-for-matrix-updates
         version: version.clone(),
         shutdown: shutdown.clone(),
+=======
+        local_version: local_version.clone(),
+        versions: versions.clone(),
+>>>>>>> main
     })?;
 
     if on_update_async.is_some() || on_connect_async.is_some() || on_disconnect_async.is_some() {

@@ -16,8 +16,8 @@ def test_snapshot_on_connect():
 
     node_b = memblast.start("b", server="127.0.0.1:7200", shape=[2])
     node_b.on_update(cb)
-    node_a.send_meta({"last_index": 1})
-    node_a.flush(0)
+    with node_a.write():
+        node_a.version_meta({"last_index": 1})
     # allow time for snapshot to transfer
     time.sleep(2)
     with node_b.read() as arr:
