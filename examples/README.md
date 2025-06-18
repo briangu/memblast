@@ -47,3 +47,13 @@ The [nn_weights/](nn_weights/) folder trains a small neural network on the XOR p
 
 The [heatmap/](heatmap/) folder streams a dynamic sine-wave heatmap. Clients render it as ASCII art.
 
+## Peer examples
+
+`peer_split.py` divides the array among multiple peers. `peer_stress.py` runs a
+similar configuration but performs continuous writes to stress test the system.
+
+## WebSocket bridge
+
+`client_ws.py` exposes array updates over a WebSocket so they can be viewed in a
+browser.
+

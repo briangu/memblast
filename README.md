@@ -1,6 +1,12 @@
 # memblast
 
-This project exposes a small Raft-backed shared memory buffer as a Python extension module.
+**memblast** exposes a memory-mapped NumPy array that can be shared between
+processes and replicated over the network. A built-in server broadcasts
+incremental updates to connected clients, which can subscribe to arbitrary
+slices or named arrays and optionally verify hashes of each snapshot. Example
+programs demonstrate streaming stock tickers, synchronizing a Conway game of
+life, broadcasting PyTorch weights, rendering dynamic heatmaps, bridging to a
+browser via WebSockets, and running a peer-to-peer mesh.
 
 ## Setup
 
@@ -33,13 +39,13 @@ In another terminal, connect with a client:
 python examples/client.py --server 0.0.0.0:7010
 ```
 
-Additional example categories live under `examples/slices` and
-`examples/tickers`. The ticker examples stream random price updates for a set of
-stock tickers and the clients compute rolling statistics.
-
-There is also a Yahoo Finance example under `examples/yfinance` that pulls
-real data using the `yfinance` library and demonstrates querying the live
-buffer with DuckDB. See `examples/yfinance/README.md` for details.
+Additional example categories live under `examples/slices`, `examples/tickers`,
+`examples/nn_weights`, `examples/heatmap`, and `examples/yfinance`. The ticker
+examples stream random price updates for a set of stock tickers and the clients
+compute rolling statistics. The neural network and heatmap folders showcase
+streaming PyTorch weights and a dynamic heatmap. The Yahoo Finance example pulls
+real prices using the `yfinance` library and demonstrates querying the live
+buffer with DuckDB. See each subdirectory's README for details.
 
 Run the ticker server:
 ```bash
@@ -69,6 +75,12 @@ python examples/peer_split.py --name b
 python examples/peer_split.py --name c
 python examples/peer_split.py --name d
 ```
+
+`examples/peer_stress.py` runs a similar peer network but repeatedly writes to
+stress test distributed updates.
+
+`examples/client_ws.py` exposes the buffer over a WebSocket so updates can be
+viewed in a browser.
 
 ## Running the tests
 
