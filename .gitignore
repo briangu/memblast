@@ -2,3 +2,8 @@ target
 .venv
 .tmp
 .cargo
+
+dist
+wheelhouse
+
+__pycache__/
