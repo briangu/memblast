@@ -2,11 +2,11 @@ mod memory;
 mod net;
 
 use memory::{MmapBuf, Shared};
-use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
+use net::{client, serve, Update, UpdatePacket, Subscription, Mapping, ConnEvent};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use pyo3::types::{PyModule, PyDict};
+use pyo3::types::{PyModule, PyBytes, PyDict, PyList};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
@@ -31,8 +31,8 @@ struct Node {
     shape: Vec<usize>,
     len: usize,
     scratch: RefCell<Vec<f64>>,
-    meta_queue: Arc<Mutex<Vec<String>>>,
-    pending_meta: Arc<Mutex<Option<String>>>,
+    meta_queue: Arc<Mutex<Vec<Vec<u8>>>>,
+    pending_meta: Arc<Mutex<Option<Vec<u8>>>>,
     meta_once: Arc<AtomicBool>,
     callback: RefCell<Option<Py<PyAny>>>,
     named: Arc<HashMap<String, Shared>>,
@@ -97,18 +97,43 @@ impl Node {
                 if start.is_none() {
                     start = Some(i);
                 }
-                end = i;
-                scratch[i] = v;
-            } else if let Some(s) = start {
-                ranges.push((s, end));
-                start = None;
+        let pickle = PyModule::import(py, "pickle")?;
+        let bytes = pickle.call_method1("dumps", (meta,))?.extract::<&pyo3::types::PyBytes>()?;
+        *self.pending_meta.lock().unwrap() = Some(bytes.as_bytes().to_vec());
+            let loads = PyModule::import(py, "pickle")?.getattr("loads")?;
+                let bytes = PyBytes::new(py, &item);
+                let obj = loads.call1((bytes,))?;
+fn conn_to_py(py: Python<'_>, c: &net::ConnEvent) -> PyObject {
+    match c {
+        net::ConnEvent::Server(s) => {
+            let d = PyDict::new(py);
+            d.set_item("server", s).unwrap();
+            d.into()
+        }
+        net::ConnEvent::Sub(sub) => {
+            let d = PyDict::new(py);
+            d.set_item("name", &sub.name).unwrap();
+            d.set_item("client_shape", &sub.client_shape).unwrap();
+            let maps = PyList::empty(py);
+            for m in &sub.maps {
+                let md = PyDict::new(py);
+                md.set_item("server_start", &m.server_start).unwrap();
+                md.set_item("shape", &m.shape).unwrap();
+                let td = PyDict::new(py);
+                match &m.target {
+                    net::Target::Region(cs) => { td.set_item("region", cs).unwrap(); }
+                    net::Target::Named(nm) => { td.set_item("named", nm).unwrap(); }
+                }
+                md.set_item("target", td).unwrap();
+                maps.append(md).unwrap();
             }
+            d.set_item("maps", maps).unwrap();
+            d.set_item("hash_check", sub.hash_check).unwrap();
+            d.into()
         }
-        if let Some(s) = start {
-            ranges.push((s, end));
-        }
-        let meta = {
-            let mut pm = self.pending_meta.lock().unwrap();
+    }
+}
+
             let m = pm.clone();
             if self.meta_once.swap(false, Ordering::SeqCst) {
                 *pm = None;
@@ -265,8 +290,8 @@ impl ReadGuard {
                 std::ptr::null_mut(),
             );
             PyArray1::from_owned_ptr(py, arr_ptr)
-        }
-    }
+    let connect_queue: Arc<Mutex<Vec<net::ConnEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    let disconnect_queue: Arc<Mutex<Vec<net::ConnEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
     fn __exit__(&mut self, _t: &PyAny, _v: &PyAny, _tb: &PyAny) -> PyResult<()> {
         Python::with_gil(|py| {
@@ -371,14 +396,38 @@ fn start(
         RUNTIME.spawn(client(
             server_addr,
             st_clone,
-            named_clone,
-            mq,
-            ver_clone,
-            vers_clone,
-            cq,
-            dq,
-            sub.clone(),
-            sd,
+                        let loads = py.import("pickle").unwrap().getattr("loads").unwrap();
+                            for m in items {
+                                let obj = loads.call1((PyBytes::new(py, m),)).unwrap();
+                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                                py.import("asyncio").unwrap().call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py))).unwrap();
+                            }
+                            for m in items {
+                                let obj = conn_to_py(py, m);
+                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                                py.import("asyncio").unwrap().call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py))).unwrap();
+                            }
+                            for m in items {
+                                let obj = conn_to_py(py, m);
+                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                                py.import("asyncio").unwrap().call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py))).unwrap();
+                            }
+                        let loads = py.import("pickle").unwrap().getattr("loads").unwrap();
+                            for m in items {
+                                let obj = loads.call1((PyBytes::new(py, m),)).unwrap();
+                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                                py.import("asyncio").unwrap().call_method1("run_coroutine_threadsafe", (coro, loop_clone.as_ref(py))).unwrap();
+                            }
+                            for m in items {
+                                let obj = conn_to_py(py, m);
+                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                                py.import("asyncio").unwrap().call_method1("run_coroutine_threadsafe", (coro, loop_clone.as_ref(py))).unwrap();
+                            }
+                            for m in items {
+                                let obj = conn_to_py(py, m);
+                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
+                                py.import("asyncio").unwrap().call_method1("run_coroutine_threadsafe", (coro, loop_clone.as_ref(py))).unwrap();
+                            }
         ));
     }
 

@@ -19,7 +19,7 @@ pub struct Update {
 #[derive(Debug, Clone)]
 pub struct UpdatePacket {
     pub updates: Vec<Update>,
-    pub meta: Option<String>,
+    pub meta: Option<Vec<u8>>,
     pub version: u64,
 }
 
@@ -44,53 +44,17 @@ pub struct Subscription {
     pub hash_check: bool,
 }
 
-fn vec_to_json(v: &[u32]) -> String {
-    let mut out = String::from("[");
-    for (i, n) in v.iter().enumerate() {
-        if i > 0 { out.push(','); }
-        out.push_str(&n.to_string());
-    }
-    out.push(']');
-    out
-}
-
-fn sub_to_json(sub: &Subscription) -> String {
-    let mut out = String::from("{\"name\":\"");
-    out.push_str(&sub.name);
-    out.push_str("\",\"client_shape\":");
-    out.push_str(&vec_to_json(&sub.client_shape));
-    out.push_str(",\"maps\":[");
-    for (i, m) in sub.maps.iter().enumerate() {
-        if i > 0 { out.push(','); }
-        out.push_str("{\"server_start\":");
-        out.push_str(&vec_to_json(&m.server_start));
-        out.push_str(",\"shape\":");
-        out.push_str(&vec_to_json(&m.shape));
-        out.push_str(",\"target\":{");
-        match &m.target {
-            Target::Region(cs) => {
-                out.push_str("\"region\":");
-                out.push_str(&vec_to_json(cs));
-            }
-            Target::Named(n) => {
-                out.push_str("\"named\":\"");
-                out.push_str(n);
-                out.push('"');
-            }
-        }
-        out.push_str("}}");
-    }
-    out.push_str("],\"hash_check\":");
-    out.push_str(if sub.hash_check { "true" } else { "false" });
-    out.push('}');
-    out
+#[derive(Debug, Clone)]
+pub enum ConnEvent {
+    Server(String),
+    Sub(Subscription),
 }
 
 
 
 fn filtered_to_bytes(
     updates: &[FilteredUpdate],
-    meta: &Option<String>,
+    meta: &Option<Vec<u8>>,
     version: u64,
     hash: Option<&[u8; 32]>,
 ) -> Vec<u8> {
@@ -115,9 +79,8 @@ fn filtered_to_bytes(
         }
     }
     if let Some(meta) = meta {
-        let bytes = meta.as_bytes();
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(bytes);
+        buf.extend_from_slice(&(meta.len() as u32).to_le_bytes());
+        buf.extend_from_slice(meta);
     } else {
         buf.extend_from_slice(&(0u32.to_le_bytes()));
     }
@@ -296,7 +259,7 @@ async fn read_update_set<F>(
     sock: &mut TcpStream,
     with_hash: bool,
     mut f: F,
-) -> Result<Option<(u64, Option<String>, Option<[u8; 32]>)>>
+) -> Result<Option<(u64, Option<Vec<u8>>, Option<[u8; 32]>)>>
 where
     F: FnMut(&[usize], Option<&str>) -> Option<Shared>,
 {
@@ -341,7 +304,7 @@ where
         if !read_exact_checked(sock, &mut buf).await? {
             return Ok(None);
         }
-        Some(String::from_utf8_lossy(&buf).to_string())
+        Some(buf)
     } else {
         None
     };
@@ -504,19 +467,19 @@ pub async fn handle_peer(
     mut sock: TcpStream,
     state: Shared,
     named: Arc<HashMap<String, Shared>>,
-    meta: Arc<Mutex<Vec<String>>>,
-    versions: Arc<Mutex<HashMap<String, u64>>>,
-    peer_id: String,
-    hash_check: bool,
+    meta: Arc<Mutex<Vec<Vec<u8>>>>,
+    pending_meta: Arc<Mutex<Option<Vec<u8>>>>,
+    connect_queue: Arc<Mutex<Vec<ConnEvent>>>,
+    disconnect_queue: Arc<Mutex<Vec<ConnEvent>>>,
 ) -> Result<()> {
-    let addr = sock.peer_addr().ok();
-    println!("peer {:?} connected", addr);
-    let local_shape = state.shape().to_vec();
-    let named_map = named.clone();
-
+                    connect_queue.lock().unwrap().push(ConnEvent::Sub(sub.clone()));
+                            disconnect_queue.lock().unwrap().push(ConnEvent::Sub(sub.clone()));
+    meta: Arc<Mutex<Vec<Vec<u8>>>>,
+    connect_queue: Arc<Mutex<Vec<ConnEvent>>>,
+    disconnect_queue: Arc<Mutex<Vec<ConnEvent>>>,
     loop {
-        let packet = match read_update_set(&mut sock, hash_check, |shape, name| {
-            if shape == local_shape && name.is_none() {
+                connect_queue.lock().unwrap().push(ConnEvent::Server(server.to_string()));
+                disconnect_queue.lock().unwrap().push(ConnEvent::Server(server.to_string()));
                 Some(state.clone())
             } else if let Some(nm) = name {
                 named_map.get(nm).cloned()
