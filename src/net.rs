@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
+use serde_json;
 use bincode;
 
 use crate::memory::Shared;
@@ -249,6 +250,7 @@ pub async fn handle_peer(
     versions: Arc<Mutex<HashMap<String, u64>>>,
     peer_id: String,
     hash_check: bool,
+    disconnect_queue: Arc<Mutex<Vec<String>>>,
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
     println!("peer {:?} connected", addr);
@@ -288,6 +290,7 @@ pub async fn handle_peer(
             }
         }
     }
+    disconnect_queue.lock().unwrap().push(peer_id);
     println!("peer {:?} disconnected", addr);
     Ok(())
 }
@@ -297,6 +300,8 @@ pub async fn serve(
     rx: async_channel::Receiver<UpdatePacket>,
     state: Shared,
     pending_meta: Arc<Mutex<Option<String>>>,
+    connect_queue: Arc<Mutex<Vec<String>>>,
+    disconnect_queue: Arc<Mutex<Vec<String>>>,
 ) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
@@ -314,6 +319,13 @@ pub async fn serve(
                     let snap_hash = if sub.hash_check { Some(state.snapshot_hash()) } else { None };
                     let wire = WireUpdate { version: 0, updates: filtered, meta, hash: snap_hash };
                     if send_message(&mut sock, &wire).await.is_ok() {
+                        let event_sub = Subscription {
+                            name: sub.name.clone(),
+                            client_shape: state.shape().iter().map(|&d| d as u32).collect(),
+                            maps: sub.maps.clone(),
+                            hash_check: sub.hash_check,
+                        };
+                        connect_queue.lock().unwrap().push(serde_json::to_string(&event_sub).unwrap());
                         conns.push((sock, sub));
                     }
                 }
@@ -335,7 +347,10 @@ pub async fn serve(
                     let wire = WireUpdate { version: u.version, updates: filtered, meta: u.meta.clone(), hash: hash_ref.cloned() };
                     match send_message(&mut s, &wire).await {
                         Ok(_) => alive.push((s, sub)),
-                        Err(e) => println!("send failed: {}", e),
+                        Err(e) => {
+                            println!("send failed: {}", e);
+                            disconnect_queue.lock().unwrap().push(sub.name.clone());
+                        }
                     }
                 }
                 conns = alive;
@@ -352,6 +367,8 @@ pub async fn client(
     meta: Arc<Mutex<Vec<String>>>,
     versions: Arc<Mutex<HashMap<String, u64>>>,
     sub: Subscription,
+    connect_queue: Arc<Mutex<Vec<String>>>,
+    disconnect_queue: Arc<Mutex<Vec<String>>>,
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
     loop {
@@ -362,6 +379,13 @@ pub async fn client(
                 if send_subscription(&mut sock, &sub).await.is_err() {
                     continue;
                 }
+                let event_sub = Subscription {
+                    name: sub.name.clone(),
+                    client_shape: state.shape().iter().map(|&d| d as u32).collect(),
+                    maps: sub.maps.clone(),
+                    hash_check: sub.hash_check,
+                };
+                connect_queue.lock().unwrap().push(serde_json::to_string(&event_sub).unwrap());
                 let res = handle_peer(
                     sock,
                     state.clone(),
@@ -370,6 +394,7 @@ pub async fn client(
                     versions.clone(),
                     server.to_string(),
                     sub.hash_check,
+                    disconnect_queue.clone(),
                 ).await;
                 if let Err(e) = res {
                     println!("connection error {}: {}", server, e);
@@ -451,6 +476,7 @@ mod tests {
         let versions = Arc::new(Mutex::new(HashMap::new()));
         let meta = Arc::new(Mutex::new(Vec::new()));
         let named = Arc::new(HashMap::new());
+        let dq = Arc::new(Mutex::new(Vec::new()));
 
         let mut sock = TcpStream::connect(addr).await.unwrap();
         let sub = Subscription {
@@ -472,6 +498,7 @@ mod tests {
             versions.clone(),
             "srv".into(),
             false,
+            dq.clone(),
         )
         .await
         .unwrap();

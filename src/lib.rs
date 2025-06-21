@@ -6,7 +6,7 @@ use net::{client, serve, Update, UpdatePacket, Subscription, Mapping};
 
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use pyo3::types::{PyModule, PyDict};
+use pyo3::types::{PyModule, PyDict, PyString};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use numpy::{Element, PyArray1};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
@@ -36,6 +36,8 @@ struct Node {
     named: Arc<HashMap<String, Shared>>,
     local_version: Arc<AtomicU64>,
     versions: Arc<Mutex<HashMap<String, u64>>>,
+    #[pyo3(get)]
+    check_hash: bool,
 }
 
 #[pymethods]
@@ -255,8 +257,58 @@ impl ReadGuard {
     }
 }
 
+fn spawn_callback_thread(
+    queue: Arc<Mutex<Vec<String>>>,
+    node: Py<Node>,
+    cb: PyObject,
+    loop_obj: PyObject,
+    parse_json: bool,
+) {
+    std::thread::spawn(move || {
+        use std::time::Duration;
+        loop {
+            let items = {
+                let mut q = queue.lock().unwrap();
+                if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) }
+            };
+            if let Some(items) = items {
+                Python::with_gil(|py| {
+                    let loads = if parse_json {
+                        Some(py.import("json").unwrap().getattr("loads").unwrap())
+                    } else {
+                        None
+                    };
+                    for it in items {
+                        let arg = match &loads {
+                            Some(l) => l.call1((it,)).unwrap().into_py(py),
+                            None => PyString::new(py, &it).into_py(py),
+                        };
+                        let coro = cb.as_ref(py).call1((node.clone_ref(py), arg)).unwrap();
+                        py.import("asyncio").unwrap()
+                            .call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py)))
+                            .unwrap();
+                    }
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
 #[pyfunction]
-#[pyo3(signature = (name, listen=None, server=None, servers=None, shape=None, maps=None, on_update_async=None, event_loop=None, check_hash=false))]
+#[pyo3(signature = (
+    name,
+    listen=None,
+    server=None,
+    servers=None,
+    shape=None,
+    maps=None,
+    on_update_async=None,
+    on_connect=None,
+    on_disconnect=None,
+    event_loop=None,
+    check_hash=false
+))]
 fn start(
     py: Python<'_>,
     name: &str,
@@ -266,6 +318,8 @@ fn start(
     shape: Option<Vec<usize>>,
     maps: Option<Vec<(Vec<usize>, Vec<usize>, Option<Vec<usize>>, Option<String>)>>,
     on_update_async: Option<PyObject>,
+    on_connect: Option<PyObject>,
+    on_disconnect: Option<PyObject>,
     event_loop: Option<PyObject>,
     check_hash: bool,
 ) -> PyResult<Py<Node>> {
@@ -275,6 +329,8 @@ fn start(
     let state = Shared::new(buf);
     let (tx, rx) = async_channel::bounded::<UpdatePacket>(1024);
     let meta_queue = Arc::new(Mutex::new(Vec::new()));
+    let connect_queue = Arc::new(Mutex::new(Vec::new()));
+    let disconnect_queue = Arc::new(Mutex::new(Vec::new()));
     let pending_meta = Arc::new(Mutex::new(None));
     let local_version = Arc::new(AtomicU64::new(0));
     let versions = Arc::new(Mutex::new(HashMap::new()));
@@ -307,7 +363,9 @@ fn start(
         let st_clone = state.clone();
         let rx_clone = rx.clone();
         let pm = pending_meta.clone();
-        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm));
+        let cq = connect_queue.clone();
+        let dq = disconnect_queue.clone();
+        RUNTIME.spawn(serve(listen_addr, rx_clone, st_clone, pm, cq, dq));
     }
 
     let mut peer_addrs: Vec<String> = servers.clone().unwrap_or_default();
@@ -332,7 +390,9 @@ fn start(
         };
         let named_clone = named_arc.clone();
         let ver_clone = versions.clone();
-        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub.clone()));
+        let cq = connect_queue.clone();
+        let dq = disconnect_queue.clone();
+        RUNTIME.spawn(client(server_addr, st_clone, named_clone, mq, ver_clone, sub.clone(), cq, dq));
     }
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -352,62 +412,32 @@ fn start(
         named: named_arc.clone(),
         local_version: local_version.clone(),
         versions: versions.clone(),
+        check_hash,
     })?;
 
-    if let Some(cb) = on_update_async {
-        if let Some(loop_obj) = event_loop {
-            let mq = meta_queue.clone();
-            let node_clone = node.clone();
-            std::thread::spawn(move || {
-                loop {
-                    let metas = {
-                        let mut q = mq.lock().unwrap();
-                        if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) }
-                    };
-                    if let Some(items) = metas {
-                        Python::with_gil(|py| {
-                            let loads = py.import("json").unwrap().getattr("loads").unwrap();
-                            for m in items {
-                                let obj = loads.call1((m,)).unwrap();
-                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
-                                py.import("asyncio").unwrap()
-                                    .call_method1("run_coroutine_threadsafe", (coro, loop_obj.as_ref(py)))
-                                    .unwrap();
-                            }
-                        });
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            });
+    let need_loop = on_update_async.is_some() || on_connect.is_some() || on_disconnect.is_some();
+    if need_loop {
+        let loop_obj: PyObject = if let Some(ref obj) = event_loop {
+            obj.clone_ref(py)
         } else {
             let asyncio = PyModule::import(py, "asyncio")?;
-            let new_loop: PyObject = asyncio.call_method0("new_event_loop")?.into();
-            asyncio.call_method1("set_event_loop", (new_loop.as_ref(py),))?;
-            let mq = meta_queue.clone();
-            let node_clone = node.clone();
-            let loop_clone = new_loop.clone_ref(py);
-            std::thread::spawn(move || {
-                loop {
-                    let metas = {
-                        let mut q = mq.lock().unwrap();
-                        if q.is_empty() { None } else { Some(q.drain(..).collect::<Vec<_>>()) }
-                    };
-                    if let Some(items) = metas {
-                        Python::with_gil(|py| {
-                            let loads = py.import("json").unwrap().getattr("loads").unwrap();
-                            for m in items {
-                                let obj = loads.call1((m,)).unwrap();
-                                let coro = cb.as_ref(py).call1((node_clone.clone_ref(py), obj)).unwrap();
-                                py.import("asyncio").unwrap()
-                                    .call_method1("run_coroutine_threadsafe", (coro, loop_clone.as_ref(py)))
-                                    .unwrap();
-                            }
-                        });
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            });
-            new_loop.as_ref(py).call_method0("run_forever")?;
+            let obj: PyObject = asyncio.call_method0("new_event_loop")?.into();
+            asyncio.call_method1("set_event_loop", (obj.as_ref(py),))?;
+            obj
+        };
+
+        if let Some(cb) = on_update_async {
+            spawn_callback_thread(meta_queue.clone(), node.clone(), cb, loop_obj.clone_ref(py), true);
+        }
+        if let Some(cb) = on_connect {
+            spawn_callback_thread(connect_queue.clone(), node.clone(), cb, loop_obj.clone_ref(py), true);
+        }
+        if let Some(cb) = on_disconnect {
+            spawn_callback_thread(disconnect_queue.clone(), node.clone(), cb, loop_obj.clone_ref(py), false);
+        }
+
+        if event_loop.is_none() {
+            loop_obj.as_ref(py).call_method0("run_forever")?;
         }
     }
 
