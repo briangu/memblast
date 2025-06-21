@@ -1,7 +1,9 @@
 import argparse
 import random
+import threading
 import time
 import numpy as np
+import asyncio
 import memblast
 import sys
 
@@ -9,7 +11,27 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--listen', default='0.0.0.0:7010')
 args = parser.parse_args()
 
-node = memblast.start("a", listen=args.listen, shape=[10,10])
+loop = asyncio.new_event_loop()
+t = threading.Thread(target=loop.run_forever, daemon=True)
+t.start()
+
+
+async def on_connect(node, sub):
+    print('connect', sub['name'])
+
+
+async def on_disconnect(node, peer):
+    print('disconnect', peer)
+
+
+node = memblast.start(
+    "a",
+    listen=args.listen,
+    shape=[10, 10],
+    on_connect=on_connect,
+    on_disconnect=on_disconnect,
+    event_loop=loop,
+)
 
 while True:
     with node.write() as a:
