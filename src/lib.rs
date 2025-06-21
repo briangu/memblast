@@ -38,6 +38,8 @@ struct Node {
     named: Arc<HashMap<String, Shared>>,
     local_version: Arc<AtomicU64>,
     versions: Arc<Mutex<HashMap<String, u64>>>,
+    #[pyo3(get)]
+    check_hash: bool,
 }
 
 #[pymethods]
@@ -414,6 +416,7 @@ fn start(
         named: named_arc.clone(),
         local_version: local_version.clone(),
         versions: versions.clone(),
+        check_hash,
     })?;
 
     let need_loop = on_update_async.is_some() || on_connect.is_some() || on_disconnect.is_some();

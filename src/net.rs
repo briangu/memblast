@@ -319,7 +319,13 @@ pub async fn serve(
                     let snap_hash = if sub.hash_check { Some(state.snapshot_hash()) } else { None };
                     let wire = WireUpdate { version: 0, updates: filtered, meta, hash: snap_hash };
                     if send_message(&mut sock, &wire).await.is_ok() {
-                        connect_queue.lock().unwrap().push(serde_json::to_string(&sub).unwrap());
+                        let event_sub = Subscription {
+                            name: sub.name.clone(),
+                            client_shape: state.shape().iter().map(|&d| d as u32).collect(),
+                            maps: sub.maps.clone(),
+                            hash_check: sub.hash_check,
+                        };
+                        connect_queue.lock().unwrap().push(serde_json::to_string(&event_sub).unwrap());
                         conns.push((sock, sub));
                     }
                 }
@@ -373,7 +379,13 @@ pub async fn client(
                 if send_subscription(&mut sock, &sub).await.is_err() {
                     continue;
                 }
-                connect_queue.lock().unwrap().push(serde_json::to_string(&sub).unwrap());
+                let event_sub = Subscription {
+                    name: sub.name.clone(),
+                    client_shape: state.shape().iter().map(|&d| d as u32).collect(),
+                    maps: sub.maps.clone(),
+                    hash_check: sub.hash_check,
+                };
+                connect_queue.lock().unwrap().push(serde_json::to_string(&event_sub).unwrap());
                 let res = handle_peer(
                     sock,
                     state.clone(),
