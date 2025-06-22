@@ -1,11 +1,11 @@
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, tcp::OwnedWriteHalf};
 use tokio::time::{self, Duration};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use serde::{Serialize, Deserialize};
 use serde_json;
 use bincode;
@@ -58,7 +58,10 @@ struct WireUpdate {
     hash: Option<[u8; 32]>,
 }
 
-async fn send_message<T: Serialize>(sock: &mut TcpStream, msg: &T) -> Result<()> {
+async fn send_message<T: Serialize, W>(sock: &mut W, msg: &T) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
     let data = bincode::serialize(msg)?;
     sock.write_all(&(data.len() as u32).to_le_bytes()).await?;
     sock.write_all(&data).await?;
@@ -306,7 +309,7 @@ pub async fn serve(
 ) -> Result<()> {
     println!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
-    let mut conns: Vec<(TcpStream, Subscription)> = Vec::new();
+    let mut conns: Vec<(OwnedWriteHalf, Subscription, Arc<AtomicBool>)> = Vec::new();
     loop {
         tokio::select! {
             res = lst.accept() => {
@@ -320,6 +323,25 @@ pub async fn serve(
                     let snap_hash = if sub.hash_check { Some(state.snapshot_hash()) } else { None };
                     let wire = WireUpdate { version: 0, updates: filtered, meta, hash: snap_hash };
                     if send_message(&mut sock, &wire).await.is_ok() {
+                        let alive = Arc::new(AtomicBool::new(true));
+                        let (mut rd, wr) = sock.into_split();
+                        {
+                            let name = sub.name.clone();
+                            let dq = disconnect_queue.clone();
+                            let alive_clone = alive.clone();
+                            tokio::spawn(async move {
+                                let mut buf = [0u8; 1];
+                                loop {
+                                    match rd.read(&mut buf).await {
+                                        Ok(0) => break,
+                                        Ok(_) => continue,
+                                        Err(_) => break,
+                                    }
+                                }
+                                alive_clone.store(false, Ordering::SeqCst);
+                                dq.lock().unwrap().push(name);
+                            });
+                        }
                         let event_sub = Subscription {
                             name: sub.name.clone(),
                             client_shape: state.shape().iter().map(|&d| d as u32).collect(),
@@ -327,7 +349,7 @@ pub async fn serve(
                             hash_check: sub.hash_check,
                         };
                         connect_queue.lock().unwrap().push(serde_json::to_string(&event_sub).unwrap());
-                        conns.push((sock, sub));
+                        conns.push((wr, sub, alive));
                     }
                 }
             }
@@ -335,21 +357,25 @@ pub async fn serve(
                 let u = match res { Ok(v) => v, Err(_) => break };
                 let mut alive = Vec::new();
                 let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
-                let hash_val = if conns.iter().any(|(_, sub)| sub.hash_check) {
+                let hash_val = if conns.iter().any(|(_, sub, _)| sub.hash_check) {
                     Some(state.snapshot_hash())
                 } else { None };
-                for (mut s, sub) in conns {
+                for (mut s, sub, alive_flag) in conns {
+                    if !alive_flag.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     let filtered = filter_updates(&u.updates, &sub, &state, &server_shape);
                     if filtered.is_empty() && u.meta.is_none() {
-                        alive.push((s, sub));
+                        alive.push((s, sub, alive_flag));
                         continue;
                     }
                     let hash_ref = if sub.hash_check { hash_val.as_ref() } else { None };
                     let wire = WireUpdate { version: u.version, updates: filtered, meta: u.meta.clone(), hash: hash_ref.cloned() };
                     match send_message(&mut s, &wire).await {
-                        Ok(_) => alive.push((s, sub)),
+                        Ok(_) => alive.push((s, sub, alive_flag)),
                         Err(e) => {
                             println!("send failed: {}", e);
+                            alive_flag.store(false, Ordering::SeqCst);
                             disconnect_queue.lock().unwrap().push(sub.name.clone());
                         }
                     }
@@ -508,7 +534,7 @@ mod tests {
 
         assert!((client_mem.get(0) - 1.2).abs() < 1e-12);
         assert!((client_mem.get(1) - 3.4).abs() < 1e-12);
-        assert_eq!(versions.lock().unwrap().get("srv"), Some(&0u64));
+        assert_eq!(versions.lock().unwrap().get("srv"), None);
     }
 }
 
