@@ -10,11 +10,11 @@ async def handle_update(node, meta):
     global latest_idx, tickers, window, con, query_template, initialized
     latest_idx = meta.get('index', latest_idx)
     if not initialized:
-        data = node.ndarray().reshape(len(tickers), window)
+        data = node.ndarray()
         con.register('data', data)
         initialized = True
     with node.read() as arr:
-        data = np.array(arr).reshape(len(tickers), window)
+        data = np.array(arr)
         valid = min(latest_idx + 1, window)
         means = (
             con.execute(query_template.format(limit=valid)).fetchall()[0]

@@ -15,13 +15,11 @@ node = memblast.start('slice_server', listen=args.listen, shape=[args.tickers, a
 index = 0
 while True:
     with node.write() as arr:
-        arr = arr.reshape(args.tickers, args.window)
         for i in range(args.tickers):
             arr[i, index % args.window] = random.uniform(100.0, 200.0)
         node.version_meta({'index': index})
     index += 1
     with node.read() as data:
-        data = data.reshape(args.tickers, args.window)
         print("\033[H\033[J", end="")
         print(data)
         sys.stdout.flush()

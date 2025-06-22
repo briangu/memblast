@@ -44,7 +44,6 @@ index = 0
 while True:
     with node.write() as arr:
         val = float((index + ordinal) % 4)
-        view = arr.reshape(dim, dim)
-        view[start[0]:start[0]+half, start[1]:start[1]+half] = val
+        arr[start[0]:start[0]+half, start[1]:start[1]+half] = val
         node.version_meta({'index': index})
     index += 1

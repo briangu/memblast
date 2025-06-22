@@ -18,7 +18,6 @@ window = args.window
 
 async def handle_update(node, meta):
     with node.read() as arr:
-        arr = arr.reshape(len(tickers), window)
         print("\033[H\033[J", end="")
         for t, row in zip(tickers, arr):
             print(f'{t}: {row}')

@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use pyo3::types::{PyModule, PyDict};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use numpy::{Element, PyArray1};
+use numpy::{Element, PyArrayDyn};
 use numpy::npyffi::{PY_ARRAY_API, NpyTypes, NPY_ARRAY_WRITEABLE, npy_intp};
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
@@ -49,17 +49,22 @@ impl Node {
         }
         dict.into()
     }
-    fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArray1<f64>> {
+    fn ndarray<'py>(slf: PyRef<'py, Self>, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArrayDyn<f64>> {
         let (ptr, shape) = if let Some(n) = name {
-            let shared = self.named.get(n)?;
+            let shared = slf.named.get(n)?;
             (shared.mm.ptr(), shared.shape())
         } else {
-            (self.state.mm.ptr(), self.shape.as_slice())
+            (slf.state.mm.ptr(), slf.shape.as_slice())
         };
 
-        let len: usize = shape.iter().product();
-        let dims: [npy_intp; 1] = [len as npy_intp];
-        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+        let dims: Vec<npy_intp> = shape.iter().map(|&d| d as npy_intp).collect();
+        let mut strides = vec![0isize as npy_intp; dims.len()];
+        let elem = std::mem::size_of::<f64>() as npy_intp;
+        let mut stride = elem;
+        for i in (0..dims.len()).rev() {
+            strides[i] = stride;
+            stride *= dims[i];
+        }
         unsafe {
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
             let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
@@ -72,9 +77,9 @@ impl Node {
                 strides.as_ptr() as *mut npy_intp,
                 ptr,
                 NPY_ARRAY_WRITEABLE,
-                std::ptr::null_mut(),
+                slf.as_ptr(),
             );
-            Some(PyArray1::from_owned_ptr(py, arr_ptr))
+            Some(PyArrayDyn::from_owned_ptr(py, arr_ptr))
         }
     }
 
@@ -180,10 +185,16 @@ struct WriteGuard {
 
 #[pymethods]
 impl WriteGuard {
-    fn __enter__<'py>(slf: PyRefMut<'py, Self>, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn __enter__<'py>(slf: PyRefMut<'py, Self>, py: Python<'py>) -> &'py PyArrayDyn<f64> {
         let cell = slf.node.as_ref(py).borrow();
-        let dims: [npy_intp; 1] = [cell.len as npy_intp];
-        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+        let dims: Vec<npy_intp> = cell.shape.iter().map(|&d| d as npy_intp).collect();
+        let mut strides = vec![0isize as npy_intp; dims.len()];
+        let elem = std::mem::size_of::<f64>() as npy_intp;
+        let mut stride = elem;
+        for i in (0..dims.len()).rev() {
+            strides[i] = stride;
+            stride *= dims[i];
+        }
         unsafe {
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
             let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
@@ -198,7 +209,7 @@ impl WriteGuard {
                 NPY_ARRAY_WRITEABLE,
                 cell.as_ptr(),
             );
-            PyArray1::from_owned_ptr(py, arr_ptr)
+            PyArrayDyn::from_owned_ptr(py, arr_ptr)
         }
     }
 
@@ -222,10 +233,19 @@ struct ReadGuard {
 
 #[pymethods]
 impl ReadGuard {
-    fn __enter__<'py>(mut slf: PyRefMut<'py, Self>, py: Python<'py>) -> &'py PyArray1<f64> {
+    fn __enter__<'py>(mut slf: PyRefMut<'py, Self>, py: Python<'py>) -> &'py PyArrayDyn<f64> {
+        let dims: Vec<npy_intp> = {
+            let cell = slf.node.as_ref(py).borrow();
+            cell.shape.iter().map(|&d| d as npy_intp).collect()
+        };
         let arr = slf.arr.as_mut().unwrap();
-        let dims: [npy_intp; 1] = [arr.len() as npy_intp];
-        let strides: [npy_intp; 1] = [std::mem::size_of::<f64>() as npy_intp];
+        let mut strides = vec![0isize as npy_intp; dims.len()];
+        let elem = std::mem::size_of::<f64>() as npy_intp;
+        let mut stride = elem;
+        for i in (0..dims.len()).rev() {
+            strides[i] = stride;
+            stride *= dims[i];
+        }
         unsafe {
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
             let descr = <f64 as Element>::get_dtype(py).into_dtype_ptr();
@@ -240,7 +260,7 @@ impl ReadGuard {
                 0,
                 std::ptr::null_mut(),
             );
-            PyArray1::from_owned_ptr(py, arr_ptr)
+            PyArrayDyn::from_owned_ptr(py, arr_ptr)
         }
     }
 

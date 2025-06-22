@@ -21,7 +21,7 @@ async def handle_update(node, meta):
         for t in tickers:
             arr = node.ndarray(f'ticker_{t}')
             if arr is not None:
-                data = np.array(arr).reshape(1, window)
+                data = np.array(arr)
                 print(f'{t}: {data[0]}')
         sys.stdout.flush()
 
