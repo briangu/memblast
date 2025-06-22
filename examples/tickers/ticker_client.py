@@ -8,7 +8,7 @@ async def handle_update(node, meta):
     global latest_idx, tickers, window
     latest_idx = meta.get('index', latest_idx)
     with node.read() as arr:
-        data = np.array(arr).reshape(len(tickers), window)
+        data = np.array(arr)
         valid = min(latest_idx + 1, window)
         view = data[:, :valid] if valid > 0 else np.zeros((len(tickers), 0))
         means = view.mean(axis=1) if valid > 0 else np.zeros(len(tickers))

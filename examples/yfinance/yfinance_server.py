@@ -42,13 +42,12 @@ while True:
             prices.append(float(data[t]['Close'].iloc[-1]))
 
     with node.write() as arr:
-        arr = arr.reshape(len(tickers), window)
         for i, price in enumerate(prices):
             arr[i, index % window] = price
         node.version_meta({'index': index})
 
     with node.read() as arr:
-        arr = np.array(arr).reshape(len(tickers), window)
+        arr = np.array(arr)
         print("\033[H\033[J", end="")
         for t, row in zip(tickers, arr):
             print(t, row)

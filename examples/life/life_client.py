@@ -23,7 +23,6 @@ else:
 
 while True:
     with node.read() as arr:
-        arr = arr.reshape(*view_shape)
         print("\033[H\033[J", end="")
         display = np.where(arr > 0, '#', '.')
         for row in display:

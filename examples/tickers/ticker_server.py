@@ -18,13 +18,11 @@ node = memblast.start("ticker_server", listen=args.listen, shape=[len(tickers), 
 index = 0
 while True:
     with node.write() as arr:
-        arr = arr.reshape(len(tickers), window)
         if index < window:
             for i in range(len(tickers)):
                 arr[i, index] = random.uniform(100.0, 200.0)
         node.version_meta({'index': index})
     with node.read() as data:
-        data = data.reshape(len(tickers), window)
         print("\033[H\033[J", end="")
         for t, row in zip(tickers, data):
             print(t, row)

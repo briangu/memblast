@@ -23,11 +23,9 @@ while True:
     world = ((neighbours == 3) | ((world > 0) & (neighbours == 2))).astype(float)
 
     with node.write() as arr:
-        arr = arr.reshape(size, size)
         arr[:, :] = world
 
     with node.read() as arr:
-        arr = arr.reshape(size, size)
         print("\033[H\033[J", end="")
         display = np.where(arr > 0, '#', '.')
         for row in display:

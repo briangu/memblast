@@ -23,11 +23,11 @@ initialized = False
 async def handle_update(node, meta):
     global initialized
     if not initialized:
-        data = node.ndarray().reshape(len(tickers), window)
+        data = node.ndarray()
         con.register('data', data)
         initialized = True
     with node.read() as arr:
-        data = arr.reshape(len(tickers), window)
+        data = arr
         print(data.shape)
         result = con.execute(query).fetchall()[0]
         print("\033[H\033[J", end="")

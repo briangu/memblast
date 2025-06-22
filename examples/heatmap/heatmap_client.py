@@ -16,7 +16,6 @@ async def handle_update(node, meta):
     global size, chars
     print(meta)
     with node.read() as arr:
-        arr = arr.reshape(size, size)
         norm = (arr - arr.min()) / (np.ptp(arr) + 1e-9)
         levels = (norm * (len(chars) - 1)).astype(int)
         print("\033[H\033[J", end="")
