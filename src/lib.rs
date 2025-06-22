@@ -49,12 +49,12 @@ impl Node {
         }
         dict.into()
     }
-    fn ndarray<'py>(&'py self, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArrayDyn<f64>> {
+    fn ndarray<'py>(slf: PyRef<'py, Self>, py: Python<'py>, name: Option<&str>) -> Option<&'py PyArrayDyn<f64>> {
         let (ptr, shape) = if let Some(n) = name {
-            let shared = self.named.get(n)?;
+            let shared = slf.named.get(n)?;
             (shared.mm.ptr(), shared.shape())
         } else {
-            (self.state.mm.ptr(), self.shape.as_slice())
+            (slf.state.mm.ptr(), slf.shape.as_slice())
         };
 
         let dims: Vec<npy_intp> = shape.iter().map(|&d| d as npy_intp).collect();
@@ -77,7 +77,7 @@ impl Node {
                 strides.as_ptr() as *mut npy_intp,
                 ptr,
                 NPY_ARRAY_WRITEABLE,
-                std::ptr::null_mut(),
+                slf.as_ptr(),
             );
             Some(PyArrayDyn::from_owned_ptr(py, arr_ptr))
         }
