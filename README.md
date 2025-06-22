@@ -24,6 +24,11 @@ browser via WebSockets, and running a peer-to-peer mesh.
    maturin develop --release
    ```
 
+
+## Building wheels for PyPI
+
+A GitHub Actions workflow builds and uploads wheels for Linux, macOS and Windows on x86_64 and aarch64 architectures. Push a tag like `v0.1.0` with the `PYPI_API_TOKEN` secret set to publish.
+
 ## Running the examples
 
 The repository contains a number of example programs under `examples/`. The
