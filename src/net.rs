@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use serde::{Serialize, Deserialize};
 use bincode;
+use log::{info, warn};
 
 use crate::memory::Shared;
 
@@ -251,7 +252,7 @@ pub async fn handle_peer(
     hash_check: bool,
 ) -> Result<()> {
     let addr = sock.peer_addr().ok();
-    println!("peer {:?} connected", addr);
+    info!("peer {:?} connected", addr);
     let local_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
     let named_map = named.clone();
 
@@ -270,7 +271,7 @@ pub async fn handle_peer(
             } else if let Some(ref nm) = upd.name {
                 named_map.get(nm).cloned()
             } else {
-                println!("shape mismatch: recv {:?} local {:?}", upd.shape, local_shape);
+                warn!("shape mismatch: recv {:?} local {:?}", upd.shape, local_shape);
                 None
             };
             if let Some(dst) = target {
@@ -284,11 +285,11 @@ pub async fn handle_peer(
         if let (true, Some(h)) = (hash_check, packet.hash) {
             let local = state.snapshot_hash();
             if h != local {
-                println!("hash mismatch from {:?}", addr);
+                warn!("hash mismatch from {:?}", addr);
             }
         }
     }
-    println!("peer {:?} disconnected", addr);
+    info!("peer {:?} disconnected", addr);
     Ok(())
 }
 
@@ -298,7 +299,7 @@ pub async fn serve(
     state: Shared,
     pending_meta: Arc<Mutex<Option<String>>>,
 ) -> Result<()> {
-    println!("listening on {}", addr);
+    info!("listening on {}", addr);
     let lst = TcpListener::bind(addr).await?;
     let mut conns: Vec<(TcpStream, Subscription)> = Vec::new();
     loop {
@@ -306,7 +307,7 @@ pub async fn serve(
             res = lst.accept() => {
                 let (mut sock, peer) = res?;
                 if let Some(sub) = read_subscription(&mut sock).await? {
-                    println!("accepted connection from {} named {}", peer, sub.name);
+                    info!("accepted connection from {} named {}", peer, sub.name);
                     let snap = snapshot_update(&state);
                     let server_shape: Vec<u32> = state.shape().iter().map(|&d| d as u32).collect();
                     let filtered = filter_updates(&[snap.clone()], &sub, &state, &server_shape);
@@ -335,7 +336,7 @@ pub async fn serve(
                     let wire = WireUpdate { version: u.version, updates: filtered, meta: u.meta.clone(), hash: hash_ref.cloned() };
                     match send_message(&mut s, &wire).await {
                         Ok(_) => alive.push((s, sub)),
-                        Err(e) => println!("send failed: {}", e),
+                        Err(e) => warn!("send failed: {}", e),
                     }
                 }
                 conns = alive;
@@ -355,10 +356,10 @@ pub async fn client(
 ) -> Result<()> {
     let mut interval = time::interval(Duration::from_secs(1));
     loop {
-        println!("connecting to server {}", server);
+        info!("connecting to server {}", server);
         match TcpStream::connect(server).await {
             Ok(mut sock) => {
-                println!("connected to {}", server);
+                info!("connected to {}", server);
                 if send_subscription(&mut sock, &sub).await.is_err() {
                     continue;
                 }
@@ -372,10 +373,10 @@ pub async fn client(
                     sub.hash_check,
                 ).await;
                 if let Err(e) = res {
-                    println!("connection error {}: {}", server, e);
+                    warn!("connection error {}: {}", server, e);
                 }
             }
-            Err(e) => println!("failed to connect to {}: {}", server, e),
+            Err(e) => warn!("failed to connect to {}: {}", server, e),
         }
         interval.tick().await;
     }
