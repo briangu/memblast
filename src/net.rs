@@ -290,7 +290,8 @@ pub async fn handle_peer(
             }
         }
     }
-    disconnect_queue.lock().unwrap().push(peer_id);
+    disconnect_queue.lock().unwrap().push(peer_id.clone());
+    versions.lock().unwrap().remove(&peer_id);
     println!("peer {:?} disconnected", addr);
     Ok(())
 }
