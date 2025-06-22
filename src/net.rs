@@ -105,6 +105,16 @@ async fn read_update_set(sock: &mut TcpStream) -> Result<Option<WireUpdate>> {
     recv_message(sock).await
 }
 
+fn connection_closed(sock: &mut TcpStream) -> bool {
+    let mut buf = [0u8; 1];
+    match sock.try_read(&mut buf) {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(ref e) if e.kind() == ErrorKind::WouldBlock => false,
+        Err(_) => true,
+    }
+}
+
 fn apply_update_values(state: &Shared, start_idx: usize, values: &[f64]) -> Result<()> {
     let len: usize = state.shape().iter().product();
     state.start_write()?;
@@ -326,6 +336,12 @@ pub async fn serve(
                     Some(state.snapshot_hash())
                 } else { None };
                 for (mut s, sub) in conns {
+                    if connection_closed(&mut s) {
+                        println!("peer disconnected");
+                        // explicitly drop the closed connection
+                        drop(s);
+                        continue;
+                    }
                     let filtered = filter_updates(&u.updates, &sub, &state, &server_shape);
                     if filtered.is_empty() && u.meta.is_none() {
                         alive.push((s, sub));
