@@ -60,12 +60,10 @@ impl Node {
         let dims: Vec<npy_intp> = shape.iter().map(|&d| d as npy_intp).collect();
         let mut strides = vec![0isize as npy_intp; dims.len()];
         let elem = std::mem::size_of::<f64>() as npy_intp;
+        let mut stride = elem;
         for i in (0..dims.len()).rev() {
-            if i == dims.len() - 1 {
-                strides[i] = elem;
-            } else {
-                strides[i] = strides[i + 1] * dims[i + 1];
-            }
+            strides[i] = stride;
+            stride *= dims[i];
         }
         unsafe {
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
@@ -192,12 +190,10 @@ impl WriteGuard {
         let dims: Vec<npy_intp> = cell.shape.iter().map(|&d| d as npy_intp).collect();
         let mut strides = vec![0isize as npy_intp; dims.len()];
         let elem = std::mem::size_of::<f64>() as npy_intp;
+        let mut stride = elem;
         for i in (0..dims.len()).rev() {
-            if i == dims.len() - 1 {
-                strides[i] = elem;
-            } else {
-                strides[i] = strides[i + 1] * dims[i + 1];
-            }
+            strides[i] = stride;
+            stride *= dims[i];
         }
         unsafe {
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
@@ -245,12 +241,10 @@ impl ReadGuard {
         let arr = slf.arr.as_mut().unwrap();
         let mut strides = vec![0isize as npy_intp; dims.len()];
         let elem = std::mem::size_of::<f64>() as npy_intp;
+        let mut stride = elem;
         for i in (0..dims.len()).rev() {
-            if i == dims.len() - 1 {
-                strides[i] = elem;
-            } else {
-                strides[i] = strides[i + 1] * dims[i + 1];
-            }
+            strides[i] = stride;
+            stride *= dims[i];
         }
         unsafe {
             let subtype = PY_ARRAY_API.get_type_object(py, NpyTypes::PyArray_Type);
