@@ -18,6 +18,8 @@ use std::net::SocketAddr;
 use std::os::raw::{c_int, c_void};
 use libc::{PROT_READ};
 use std::collections::HashMap;
+use env_logger;
+use log::info;
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("tokio"));
 
@@ -337,7 +339,7 @@ fn start(
 
     state.protect(PROT_READ).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-    println!("node {} running with listen={:?} server={:?} servers={:?} shape {:?}",
+    info!("node {} running with listen={:?} server={:?} servers={:?} shape {:?}",
         name, listen, server, servers, shape);
     let node = Py::new(py, Node {
         state,
@@ -416,6 +418,7 @@ fn start(
 
 #[pymodule]
 fn memblast(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+    let _ = env_logger::builder().format_timestamp(None).try_init();
     m.add_class::<Node>()?;
     m.add_class::<WriteGuard>()?;
     m.add_class::<ReadGuard>()?;
